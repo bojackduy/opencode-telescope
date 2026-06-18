@@ -31,6 +31,7 @@ describe("session search helpers", () => {
           message_id: "msg_1",
           session_id: "ses_1",
           session_title: "Test",
+          directory: "/tmp/project",
           role: "user",
           time_created: 1,
           text: "hello",

@@ -17,6 +17,7 @@ export type SearchResult = {
   before: string
   match: string
   after: string
+  excerpt: string
   text: string
 }
 
@@ -132,7 +133,7 @@ export function loadMessageContext(result: SearchResult, options?: { radius?: nu
 }
 
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
-  const text = row.text.replace(/\s+/g, " ").trim()
+  const text = row.text.trim()
   const match = findMatch(text, query)
   if (!match) return
   return {
@@ -149,6 +150,7 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     before: match.before,
     match: match.match,
     after: match.after,
+    excerpt: match.excerpt,
     text,
   }
 }
@@ -173,24 +175,34 @@ export function makeSnippet(text: string, query: string, radius = 72) {
 function findMatch(text: string, query: string, radius = 96) {
   const needle = query.trim()
   if (!needle) {
-    const end = Math.min(text.length, radius * 2)
+    const collapsed = text.replace(/\s+/g, " ").trim()
+    const end = Math.min(collapsed.length, radius * 2)
     return {
       start: 0,
       end: 0,
       before: "",
       match: "",
-      after: text.slice(0, end),
+      after: collapsed.slice(0, end),
+      excerpt: collapsed.slice(0, end),
     }
   }
   const start = text.toLowerCase().indexOf(needle.toLowerCase())
   if (start === -1) return
   const end = start + needle.length
+  const lineStart = text.lastIndexOf("\n", start - 1) + 1
+  const nextLine = text.indexOf("\n", end)
+  const lineEnd = nextLine === -1 ? text.length : nextLine
+  const line = text.slice(lineStart, lineEnd).replace(/\s+/g, " ").trim()
+  const lineMatchStart = Math.max(0, start - lineStart)
+  const excerptStart = Math.max(0, lineMatchStart - radius)
+  const excerptEnd = Math.min(line.length, lineMatchStart + needle.length + radius)
   return {
     start,
     end,
-    before: `${Math.max(0, start - radius) > 0 ? "..." : ""}${text.slice(Math.max(0, start - radius), start)}`,
+    before: `${excerptStart > 0 ? "..." : ""}${line.slice(excerptStart, lineMatchStart)}`,
     match: text.slice(start, end),
-    after: `${text.slice(end, Math.min(text.length, end + radius))}${end + radius < text.length ? "..." : ""}`,
+    after: `${line.slice(lineMatchStart + needle.length, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
+    excerpt: `${excerptStart > 0 ? "..." : ""}${line.slice(excerptStart, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
   }
 }
 
