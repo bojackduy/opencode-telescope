@@ -12,6 +12,11 @@ export type SearchResult = {
   role: "user" | "assistant"
   timeCreated: number
   snippet: string
+  matchStart: number
+  matchEnd: number
+  before: string
+  match: string
+  after: string
   text: string
 }
 
@@ -128,7 +133,8 @@ export function loadMessageContext(result: SearchResult, options?: { radius?: nu
 
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
   const text = row.text.replace(/\s+/g, " ").trim()
-  if (!text.toLowerCase().includes(query.trim().toLowerCase())) return
+  const match = findMatch(text, query)
+  if (!match) return
   return {
     id: row.id,
     messageID: row.message_id,
@@ -138,6 +144,11 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     role: row.role,
     timeCreated: row.time_created,
     snippet: makeSnippet(text, query),
+    matchStart: match.start,
+    matchEnd: match.end,
+    before: match.before,
+    match: match.match,
+    after: match.after,
     text,
   }
 }
@@ -157,6 +168,30 @@ export function makeSnippet(text: string, query: string, radius = 72) {
   const start = Math.max(0, index - radius)
   const end = Math.min(haystack.length, index + query.length + radius)
   return `${start > 0 ? "..." : ""}${haystack.slice(start, end)}${end < haystack.length ? "..." : ""}`
+}
+
+function findMatch(text: string, query: string, radius = 96) {
+  const needle = query.trim()
+  if (!needle) {
+    const end = Math.min(text.length, radius * 2)
+    return {
+      start: 0,
+      end: 0,
+      before: "",
+      match: "",
+      after: text.slice(0, end),
+    }
+  }
+  const start = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (start === -1) return
+  const end = start + needle.length
+  return {
+    start,
+    end,
+    before: `${Math.max(0, start - radius) > 0 ? "..." : ""}${text.slice(Math.max(0, start - radius), start)}`,
+    match: text.slice(start, end),
+    after: `${text.slice(end, Math.min(text.length, end + radius))}${end + radius < text.length ? "..." : ""}`,
+  }
 }
 
 function searchRows(db: Database, query: string, limit: number, directory?: string) {
