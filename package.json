@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-telescope",
+  "version": "0.1.0",
+  "description": "Telescope-style session conversation search for OpenCode TUI",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test"
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "tui.tsx",
+    "telescope.tsx",
+    "search.ts",
+    "tsconfig.json"
+  ],
+  "exports": {
+    ".": {
+      "import": "./tui.tsx"
+    },
+    "./tui": {
+      "import": "./tui.tsx"
+    }
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opentui/core": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.14.28",
+    "@opentui/core": "^0.1.105",
+    "@opentui/solid": "^0.1.105",
+    "@types/bun": "^1.3.13",
+    "solid-js": "^1.9.12",
+    "typescript": "^5.9.3"
+  }
+}
