@@ -18,15 +18,12 @@ export type SearchResult = {
   match: string
   after: string
   excerpt: string
+  previewBefore: string
+  previewMatch: string
+  previewAfter: string
+  previewMode: "markdown" | "text"
+  previewHighlight: boolean
   text: string
-}
-
-export type PreviewMessage = {
-  id: string
-  messageID: string
-  role: "user" | "assistant"
-  text: string
-  match: boolean
 }
 
 type Row = {
@@ -93,49 +90,11 @@ export function recentSessionMessages(options?: { limit?: number; dbPath?: strin
   }
 }
 
-export function loadMessageContext(result: SearchResult, options?: { radius?: number; dbPath?: string }) {
-  const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
-  try {
-    return db
-      .query<Row, [string, string, number, number]>(`
-        WITH visible AS (
-          SELECT p.id, p.message_id, p.session_id, s.title AS session_title,
-                 s.directory,
-                 json_extract(m.data, '$.role') AS role,
-                 p.time_created,
-                 json_extract(p.data, '$.text') AS text,
-                 row_number() OVER (ORDER BY p.time_created ASC, p.id ASC) AS rn
-          FROM part p
-          JOIN message m ON m.id = p.message_id
-          JOIN session s ON s.id = p.session_id
-          WHERE p.session_id = ?
-            AND json_extract(p.data, '$.type') = 'text'
-            AND json_extract(m.data, '$.role') IN ('user', 'assistant')
-        ), hit AS (
-          SELECT rn FROM visible WHERE id = ?
-        )
-        SELECT id, message_id, session_id, session_title, directory, role, time_created, text
-        FROM visible
-        WHERE rn BETWEEN (SELECT rn FROM hit) - ? AND (SELECT rn FROM hit) + ?
-        ORDER BY time_created ASC, id ASC
-      `)
-      .all(result.sessionID, result.id, options?.radius ?? 3, options?.radius ?? 3)
-      .map((row) => ({
-        id: row.id,
-        messageID: row.message_id,
-        role: row.role,
-        text: row.text,
-        match: row.id === result.id,
-      }))
-  } finally {
-    db.close()
-  }
-}
-
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
   const text = row.text.trim()
   const match = findMatch(text, query)
   if (!match) return
+  const preview = focusedPreview(text, match.start, match.end)
   return {
     id: row.id,
     messageID: row.message_id,
@@ -151,6 +110,11 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     match: match.match,
     after: match.after,
     excerpt: match.excerpt,
+    previewBefore: preview.before,
+    previewMatch: preview.match,
+    previewAfter: preview.after,
+    previewMode: preview.mode,
+    previewHighlight: preview.highlight,
     text,
   }
 }
@@ -204,6 +168,70 @@ function findMatch(text: string, query: string, radius = 96) {
     after: `${line.slice(lineMatchStart + needle.length, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
     excerpt: `${excerptStart > 0 ? "..." : ""}${line.slice(excerptStart, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
   }
+}
+
+function focusedPreview(text: string, matchStart: number, matchEnd: number) {
+  if (matchStart === matchEnd) {
+    const preview = text.slice(0, Math.min(text.length, 1400))
+    return { before: preview, match: "", after: "", mode: "markdown" as const, highlight: false }
+  }
+
+  const lineStart = text.lastIndexOf("\n", matchStart - 1) + 1
+  const nextLine = text.indexOf("\n", matchEnd)
+  const lineEnd = nextLine === -1 ? text.length : nextLine
+  const line = text.slice(lineStart, lineEnd)
+
+  if (line.length > 260) {
+    const beforeStart = Math.max(0, matchStart - 180)
+    const afterEnd = Math.min(text.length, matchEnd + 220)
+    return {
+      before: `${beforeStart > 0 ? "..." : ""}${text.slice(beforeStart, matchStart)}`,
+      match: text.slice(matchStart, matchEnd),
+      after: `${text.slice(matchEnd, afterEnd)}${afterEnd < text.length ? "..." : ""}`,
+      mode: "text" as const,
+      highlight: true,
+    }
+  }
+
+  const window = lineWindow(text, matchStart, matchEnd, 40, 80)
+  const windowText = text.slice(window.start, window.end)
+  const relativeStart = matchStart - window.start
+  const relativeEnd = matchEnd - window.start
+
+  const insideCodeFence = isInsideCodeFence(text, matchStart)
+  return {
+    before: `${window.start > 0 ? "...\n" : ""}${windowText.slice(0, relativeStart)}`,
+    match: windowText.slice(relativeStart, relativeEnd),
+    after: `${windowText.slice(relativeEnd)}${window.end < text.length ? "\n..." : ""}`,
+    mode: "markdown" as const,
+    highlight: !insideCodeFence,
+  }
+}
+
+function lineWindow(text: string, matchStart: number, matchEnd: number, before: number, after: number) {
+  const starts = [0]
+  for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
+    starts.push(index + 1)
+  }
+  const matchLine = findLastStartIndex(starts, matchStart)
+  const startLine = Math.max(0, matchLine - before)
+  const endLine = Math.min(starts.length - 1, matchLine + after)
+  const start = starts[startLine] ?? 0
+  const end = starts[endLine + 1] ? starts[endLine + 1] - 1 : text.length
+  return { start, end: Math.max(end, matchEnd) }
+}
+
+function findLastStartIndex(starts: number[], offset: number) {
+  for (let index = starts.length - 1; index >= 0; index--) {
+    if (starts[index]! <= offset) return index
+  }
+  return 0
+}
+
+function isInsideCodeFence(text: string, offset: number) {
+  const before = text.slice(0, offset)
+  const fences = before.match(/^```/gm)
+  return Boolean(fences && fences.length % 2 === 1)
 }
 
 function searchRows(db: Database, query: string, limit: number, directory?: string) {
