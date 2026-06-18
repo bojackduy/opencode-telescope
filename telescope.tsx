@@ -3,7 +3,7 @@ import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { type InputRenderable, type ParsedKey } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
-import { loadMessageContext, recentSessionMessages, resolveDatabasePath, searchSessionMessages, type PreviewMessage, type SearchResult } from "./search.ts"
+import { recentSessionMessages, resolveDatabasePath, searchSessionMessages, type SearchResult } from "./search.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => {
   const dimensions = useTerminalDimensions()
@@ -12,7 +12,6 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [selected, setSelected] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
-  const [preview, setPreview] = createSignal<PreviewMessage[]>([])
   let input: InputRenderable | undefined
 
   const theme = createMemo(() => props.api.theme.current)
@@ -53,19 +52,6 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       }
     }, 180)
     onCleanup(() => clearTimeout(timer))
-  })
-
-  createEffect(() => {
-    const item = selectedResult()
-    if (!item) {
-      setPreview([])
-      return
-    }
-    try {
-      setPreview(loadMessageContext(item, { dbPath }))
-    } catch {
-      setPreview([{ id: item.id, messageID: item.messageID, role: item.role, text: item.text, match: true }])
-    }
   })
 
   const move = (delta: number) => {
@@ -161,16 +147,18 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
           </box>
 
           <box flexGrow={1} flexDirection="column" minHeight={0}>
-            <PreviewHeader item={selectedResult()} theme={theme()} />
+            <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
             <scrollbox flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: false }}>
-              <For each={preview()}>{(item) => <PreviewMessageRow item={item} theme={theme()} />}</For>
+              <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
+                {(item) => <SelectedPreview item={item()} query={query()} theme={theme()} />}
+              </Show>
             </scrollbox>
           </box>
         </box>
 
         <box paddingLeft={1} paddingRight={1} flexDirection="row" gap={2} border={["top"]} borderColor={theme().border}>
           <text fg={theme().textMuted}>^J/^K move</text>
-          <text fg={theme().textMuted}>enter jump to session</text>
+          <text fg={theme().textMuted}>enter open session</text>
           <text fg={theme().textMuted}>esc close</text>
         </box>
     </box>
@@ -189,18 +177,26 @@ const ResultRow = (props: {
     flexDirection="column"
     paddingLeft={1}
     paddingRight={1}
+    paddingTop={1}
+    paddingBottom={1}
+    border={["bottom"]}
+    borderColor={props.theme.borderSubtle}
     backgroundColor={props.active ? props.theme.primary : undefined}
     onMouseOver={props.onMouseOver}
     onMouseUp={props.onOpen}
   >
-    <text fg={props.active ? props.theme.selectedListItemText : props.theme.accent} wrapMode="none" overflow="hidden">
-      {props.item.sessionTitle}
-    </text>
-    <text fg={props.active ? props.theme.selectedListItemText : props.theme.textMuted} wrapMode="none">
-      [{props.item.role}] {formatTime(props.item.timeCreated)}
+    <text wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.text }}>
+        {truncate(props.item.sessionTitle, 42)}
+      </span>
+      <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>
+        {"  "}{props.item.role} · {formatTime(props.item.timeCreated)}
+      </span>
     </text>
     <HighlightedText
-      text={props.item.snippet}
+      before={props.item.before}
+      match={props.item.match}
+      after={props.item.after}
       query={props.query}
       active={props.active}
       theme={props.theme}
@@ -208,60 +204,56 @@ const ResultRow = (props: {
   </box>
 )
 
-const PreviewHeader = (props: { item: SearchResult | undefined; theme: TuiThemeCurrent }) => (
-  <box paddingLeft={1} paddingRight={1} flexDirection="column">
-    <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the conversation.</text>}>
+const PreviewHeader = (props: { item: SearchResult | undefined; query: string; theme: TuiThemeCurrent }) => (
+  <box paddingLeft={1} paddingRight={1} paddingBottom={1} flexDirection="column" border={["bottom"]} borderColor={props.theme.border}>
+    <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
       {(item) => (
         <>
-          <text fg={props.theme.accent}>{item().sessionTitle}</text>
+          <text fg={props.theme.text} wrapMode="none" overflow="hidden">Session: {item().sessionTitle}</text>
           <text fg={props.theme.textMuted}>
-            [{item().role}] {formatTime(item().timeCreated)} · {item().messageID}
+            Author: {item().role} · Time: {formatTime(item().timeCreated)}
           </text>
+          <text fg={props.theme.textMuted}>Query: {props.query.trim() || "recent messages"}</text>
         </>
       )}
     </Show>
   </box>
 )
 
-const HighlightedText = (props: { text: string; query: string; active: boolean; theme: TuiThemeCurrent }) => {
-  const parts = createMemo(() => splitMatch(props.text, props.query))
-  return (
-    <text wrapMode="none" overflow="hidden">
-      <For each={parts()}>
-        {(part) => (
-          <span
-            style={{
-              fg: props.active
-                ? props.theme.selectedListItemText
-                : part.match
-                  ? props.theme.warning
-                  : props.theme.textMuted,
-            }}
-          >
-            {part.text}
-          </span>
-        )}
-      </For>
-    </text>
-  )
-}
+const HighlightedText = (props: {
+  before: string
+  match: string
+  after: string
+  query: string
+  active: boolean
+  theme: TuiThemeCurrent
+}) => (
+  <text wrapMode="none" overflow="hidden">
+    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>{props.before}</span>
+    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.warning }}>{props.match || props.query}</span>
+    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>{props.after}</span>
+  </text>
+)
 
-const PreviewMessageRow = (props: { item: PreviewMessage; theme: TuiThemeCurrent }) => (
-  <box
-    flexDirection="column"
-    paddingTop={1}
-    paddingLeft={props.item.match ? 1 : 0}
-    border={props.item.match ? ["left"] : undefined}
-    borderColor={props.item.match ? props.theme.warning : undefined}
-  >
-    <text fg={props.item.match ? props.theme.warning : props.theme.textMuted}>
-      {props.item.match ? "match · " : ""}{props.item.role}
-    </text>
+const SelectedPreview = (props: { item: SearchResult; query: string; theme: TuiThemeCurrent }) => (
+  <box flexDirection="column" paddingTop={1}>
+    <text fg={props.theme.accent}>matched excerpt</text>
+    <box paddingBottom={1} border={["bottom"]} borderColor={props.theme.borderSubtle}>
+      <HighlightedText
+        before={props.item.before}
+        match={props.item.match}
+        after={props.item.after}
+        query={props.query}
+        active={false}
+        theme={props.theme}
+      />
+    </box>
+    <text fg={props.theme.accent} marginTop={1}>selected message</text>
     <markdown
-      content={props.item.text.trim()}
+      content={props.item.text}
       internalBlockMode="top-level"
       tableOptions={{ style: "grid" }}
-      fg={props.item.match ? props.theme.markdownText : props.theme.textMuted}
+      fg={props.theme.markdownText}
       bg={props.theme.backgroundPanel}
     />
   </box>
@@ -273,20 +265,13 @@ const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
   </box>
 )
 
-function splitMatch(text: string, query: string) {
-  const needle = query.trim()
-  if (!needle) return [{ text, match: false }]
-  const index = text.toLowerCase().indexOf(needle.toLowerCase())
-  if (index === -1) return [{ text, match: false }]
-  return [
-    { text: text.slice(0, index), match: false },
-    { text: text.slice(index, index + needle.length), match: true },
-    { text: text.slice(index + needle.length), match: false },
-  ].filter((part) => part.text.length > 0)
-}
-
 function formatTime(time: number) {
   return new Date(time).toLocaleString()
+}
+
+function truncate(value: string, length: number) {
+  if (value.length <= length) return value
+  return `${value.slice(0, length - 1)}…`
 }
 
 function isKey(evt: ParsedKey, ...names: string[]) {
