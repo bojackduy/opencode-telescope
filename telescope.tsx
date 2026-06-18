@@ -19,9 +19,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const theme = createMemo(() => props.api.theme.current)
   const syntax = createMemo(() => syntaxStyle(theme()))
   const selectedResult = createMemo(() => results()[selected()])
-  const leftWidth = createMemo(() => Math.max(34, Math.min(56, Math.floor(dimensions().width * 0.38))))
+  const popupWidth = createMemo(() => Math.max(72, Math.min(dimensions().width - 2, Math.floor(dimensions().width * 0.92))))
+  const leftWidth = createMemo(() => Math.max(36, Math.min(64, Math.floor(popupWidth() * 0.36))))
   const height = createMemo(() => Math.max(18, dimensions().height - 8))
-  const verticalOffset = createMemo(() => Math.floor(dimensions().height / 4 - height() / 2))
+  const verticalOffset = createMemo(() => Math.floor(dimensions().height / 4 - height() / 2) - 2)
   const dbPath = resolveDatabasePath()
   const directory = props.api.state.path.directory
 
@@ -88,6 +89,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     props.api.route.navigate("session", { sessionID: item.sessionID })
   }
 
+  const scrollPreview = (direction: 1 | -1, evt: ParsedKey) => {
+    prevent(evt)
+    previewScroll?.scrollBy(direction * previewScrollAmount(previewScroll))
+  }
+
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
     if (isKey(evt, "escape", "esc") || (evt.ctrl && isKey(evt, "c"))) {
@@ -110,12 +116,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       open()
       return
     }
+    if (evt.ctrl && isKey(evt, "d")) {
+      scrollPreview(1, evt)
+      return
+    }
+    if (evt.ctrl && isKey(evt, "u")) {
+      scrollPreview(-1, evt)
+      return
+    }
   })
 
   return (
+    <box width="100%" alignItems="center">
     <box
       flexDirection="column"
-      width="100%"
+      width={popupWidth()}
       height={height()}
       marginTop={verticalOffset()}
       border
@@ -123,22 +138,41 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       borderColor={theme().border}
       backgroundColor={theme().backgroundPanel}
     >
-        <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={theme().border}>
-          <box flexDirection="row" gap={1}>
+        <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={2} flexShrink={0}>
+          <box
+            flexDirection="row"
+            gap={1}
+            paddingLeft={1}
+            paddingRight={1}
+            paddingTop={1}
+            paddingBottom={1}
+            border
+            borderStyle="rounded"
+            borderColor={theme().borderActive}
+            backgroundColor={theme().backgroundElement}
+            flexShrink={0}
+          >
             <text fg={theme().accent}>search</text>
+            <text fg={theme().textMuted}>›</text>
+            <input
+              ref={(element: InputRenderable) => (input = element)}
+              placeholder="grep conversations..."
+              placeholderColor={theme().textMuted}
+              cursorColor={theme().primary}
+              focusedTextColor={theme().text}
+              focusedBackgroundColor={theme().backgroundElement}
+              onInput={(value) => setQuery(value)}
+              onKeyDown={(evt: ParsedKey) => {
+                if (evt.ctrl && isKey(evt, "d")) {
+                  scrollPreview(1, evt)
+                  return
+                }
+                if (evt.ctrl && isKey(evt, "u")) scrollPreview(-1, evt)
+              }}
+              flexGrow={1}
+            />
             <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
           </box>
-          <input
-            ref={(element: InputRenderable) => (input = element)}
-            placeholder="grep conversations..."
-            placeholderColor={theme().textMuted}
-            cursorColor={theme().primary}
-            focusedTextColor={theme().text}
-            focusedBackgroundColor={theme().backgroundElement}
-            onInput={(value) => setQuery(value)}
-            marginTop={1}
-            flexGrow={1}
-          />
         </box>
 
         <box flexDirection="row" flexGrow={1} minHeight={0}>
@@ -184,9 +218,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
         <box paddingLeft={1} paddingRight={1} flexDirection="row" gap={2} border={["top"]} borderColor={theme().border}>
           <text fg={theme().textMuted}>^J/^K move</text>
+          <text fg={theme().textMuted}>^D/^U preview</text>
           <text fg={theme().textMuted}>enter open session</text>
           <text fg={theme().textMuted}>esc close</text>
         </box>
+    </box>
     </box>
   )
 }
@@ -348,6 +384,10 @@ function sessionTitleWidth(width: number) {
   if (width >= 54) return 28
   if (width >= 48) return 22
   return Math.max(18, width - 4)
+}
+
+function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
+  return Math.max(1, Math.floor((scroll?.height || 10) / 8))
 }
 
 function markdownWithMatch(before: string, match: string, after: string, highlight: boolean) {
