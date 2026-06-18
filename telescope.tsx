@@ -110,16 +110,6 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       open()
       return
     }
-    if (evt.ctrl && isKey(evt, "d")) {
-      prevent(evt)
-      previewScroll?.scrollBy(Math.max(1, Math.floor((previewScroll.height || 10) / 4)))
-      return
-    }
-    if (evt.ctrl && isKey(evt, "u")) {
-      prevent(evt)
-      previewScroll?.scrollBy(-Math.max(1, Math.floor((previewScroll.height || 10) / 4)))
-      return
-    }
   })
 
   return (
@@ -166,6 +156,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                       <ResultRow
                         item={item}
                         active={index() === selected()}
+                        width={leftWidth()}
                         query={query()}
                         theme={theme()}
                         onMouseOver={() => setSelected(index())}
@@ -190,7 +181,6 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
         <box paddingLeft={1} paddingRight={1} flexDirection="row" gap={2} border={["top"]} borderColor={theme().border}>
           <text fg={theme().textMuted}>^J/^K move</text>
-          <text fg={theme().textMuted}>^D/^U preview</text>
           <text fg={theme().textMuted}>enter open session</text>
           <text fg={theme().textMuted}>esc close</text>
         </box>
@@ -201,6 +191,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 const ResultRow = (props: {
   item: SearchResult
   active: boolean
+  width: number
   query: string
   theme: TuiThemeCurrent
   onMouseOver: () => void
@@ -210,22 +201,30 @@ const ResultRow = (props: {
     flexDirection="column"
     paddingLeft={1}
     paddingRight={1}
-    paddingTop={1}
-    paddingBottom={1}
+    paddingTop={0}
+    paddingBottom={0}
     border={["bottom"]}
     borderColor={props.theme.borderSubtle}
-    backgroundColor={props.active ? props.theme.primary : undefined}
+    backgroundColor={props.active ? props.theme.backgroundElement : undefined}
     onMouseOver={props.onMouseOver}
     onMouseUp={props.onOpen}
   >
     <text wrapMode="none" overflow="hidden">
-      <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.text }}>
-        {truncate(props.item.sessionTitle, 42)}
+      <span style={{ fg: props.active ? props.theme.accent : props.theme.text, bold: true }}>
+        {truncate(props.item.sessionTitle, sessionTitleWidth(props.width))}
       </span>
-      <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>
-        {"  "}{props.item.role} · {formatTime(props.item.timeCreated)}
-      </span>
+      <Show when={props.width >= 48}>
+        <span style={{ fg: props.theme.textMuted }}>  </span>
+        <span style={{ fg: roleColor(props.item.role, props.theme), bold: true }}>{roleLabel(props.item.role)}</span>
+        <span style={{ fg: props.theme.textMuted }}> · {compactTime(props.item.timeCreated)}</span>
+      </Show>
     </text>
+    <Show when={props.width < 48}>
+      <text wrapMode="none" overflow="hidden">
+        <span style={{ fg: roleColor(props.item.role, props.theme), bold: true }}>{roleLabel(props.item.role)}</span>
+        <span style={{ fg: props.theme.textMuted }}> · {compactTime(props.item.timeCreated)}</span>
+      </text>
+    </Show>
     <HighlightedText
       before={props.item.before}
       match={props.item.match}
@@ -262,9 +261,10 @@ const HighlightedText = (props: {
   theme: TuiThemeCurrent
 }) => (
   <text wrapMode="none" overflow="hidden">
-    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>{props.before}</span>
-    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.warning }}>{props.match || props.query}</span>
-    <span style={{ fg: props.active ? props.theme.selectedListItemText : props.theme.textMuted }}>{props.after}</span>
+    <span style={{ fg: props.theme.textMuted }}>  </span>
+    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.before}</span>
+    <span style={{ fg: props.theme.warning, bold: true }}>{props.match || props.query}</span>
+    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.after}</span>
   </text>
 )
 
@@ -326,6 +326,25 @@ const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
 
 function formatTime(time: number) {
   return new Date(time).toLocaleString()
+}
+
+function compactTime(time: number) {
+  const date = new Date(time)
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+}
+
+function roleLabel(role: SearchResult["role"]) {
+  return role === "assistant" ? "assistant" : "you"
+}
+
+function roleColor(role: SearchResult["role"], theme: TuiThemeCurrent) {
+  return role === "assistant" ? theme.info : theme.primary
+}
+
+function sessionTitleWidth(width: number) {
+  if (width >= 54) return 28
+  if (width >= 48) return 22
+  return Math.max(18, width - 4)
 }
 
 function markdownWithMatch(before: string, match: string, after: string, highlight: boolean) {
