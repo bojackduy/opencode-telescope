@@ -123,19 +123,22 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       borderColor={theme().border}
       backgroundColor={theme().backgroundPanel}
     >
-        <box flexDirection="row" paddingLeft={1} paddingRight={1} gap={1} border={["bottom"]} borderColor={theme().border}>
-          <text fg={theme().accent}>search sessions</text>
+        <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} border={["bottom"]} borderColor={theme().border}>
+          <box flexDirection="row" gap={1}>
+            <text fg={theme().accent}>search</text>
+            <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
+          </box>
           <input
             ref={(element: InputRenderable) => (input = element)}
             placeholder="grep conversations..."
             placeholderColor={theme().textMuted}
             cursorColor={theme().primary}
             focusedTextColor={theme().text}
-            focusedBackgroundColor={theme().backgroundPanel}
+            focusedBackgroundColor={theme().backgroundElement}
             onInput={(value) => setQuery(value)}
+            marginTop={1}
             flexGrow={1}
           />
-          <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
         </box>
 
         <box flexDirection="row" flexGrow={1} minHeight={0}>
