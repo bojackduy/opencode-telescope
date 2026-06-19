@@ -274,6 +274,9 @@ const ResultRow = (props: {
     onMouseUp={props.onOpen}
   >
     <text wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.active ? props.theme.accent : props.theme.textMuted }}>
+        {props.active ? "› " : "  "}
+      </span>
       <span style={{ fg: props.active ? props.theme.accent : props.theme.text, bold: true }}>
         {truncate(props.item.sessionTitle, sessionTitleWidth(props.width))}
       </span>
@@ -360,6 +363,7 @@ const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchRes
     id={props.part.messageID}
     border={["left"]}
     borderColor={props.part.target ? props.theme.warning : props.theme.primary}
+    customBorderChars={splitBorderChars}
     marginTop={1}
   >
     <box paddingTop={1} paddingBottom={1} paddingLeft={2} backgroundColor={props.theme.backgroundPanel} flexDirection="column">
@@ -372,7 +376,7 @@ const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchRes
 const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
   <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
     <Show when={props.part.target}>
-      <text fg={props.theme.warning}>matched assistant · {compactTime(props.part.timeCreated)}</text>
+      <TargetMarker role="assistant" time={props.part.timeCreated} theme={props.theme} />
     </Show>
     <markdown
       syntaxStyle={props.syntax}
@@ -391,6 +395,9 @@ const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: Sy
   return (
     <Show when={summary().title || summary().body}>
       <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
+        <Show when={props.part.target}>
+          <TargetMarker role="thought" time={props.part.timeCreated} theme={props.theme} />
+        </Show>
         <text fg={props.theme.warning} wrapMode="none">
           <span>Thought</span>
           <Show when={summary().title}>
@@ -425,6 +432,9 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiTheme
   })
   return (
     <box id={`tool-inline-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
+      <Show when={props.part.target}>
+        <TargetMarker role="tool" time={props.part.timeCreated} theme={props.theme} />
+      </Show>
       <text fg={color()} wrapMode="none" overflow="hidden">
         <span style={{ fg: failed() ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
         <span>{toolLabel(props.part.tool)}</span>
@@ -440,6 +450,13 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiTheme
     </box>
   )
 }
+
+const TargetMarker = (props: { role: string; time: number; theme: TuiThemeCurrent }) => (
+  <text fg={props.theme.warning} wrapMode="none" overflow="hidden">
+    <span>match</span>
+    <span style={{ fg: props.theme.textMuted }}> · {props.role} · {compactTime(props.time)}</span>
+  </text>
+)
 
 const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
   const match = createMemo(() => conversationMatch(props.part, props.item))
@@ -487,7 +504,21 @@ function roleColor(role: SearchResult["role"], theme: TuiThemeCurrent) {
 function sessionTitleWidth(width: number) {
   if (width >= 54) return 28
   if (width >= 48) return 22
-  return Math.max(18, width - 4)
+  return Math.max(18, width - 6)
+}
+
+const splitBorderChars = {
+  topLeft: "",
+  bottomLeft: "",
+  vertical: "┃",
+  topRight: "",
+  bottomRight: "",
+  horizontal: " ",
+  bottomT: "",
+  topT: "",
+  cross: "",
+  leftT: "",
+  rightT: "",
 }
 
 function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
