@@ -31,9 +31,19 @@ export type ConversationPreviewPart = {
   messageID: string
   sessionID: string
   role: "user" | "assistant"
+  type: "text" | "reasoning" | "tool"
   timeCreated: number
   text: string
+  tool?: string
+  state?: ToolState
   target: boolean
+}
+
+export type ToolState = {
+  status: "pending" | "running" | "completed" | "error"
+  input?: unknown
+  output?: string
+  error?: string
 }
 
 type Row = {
@@ -52,8 +62,9 @@ type ConversationRow = {
   message_id: string
   session_id: string
   role: "user" | "assistant"
+  type: "text" | "reasoning" | "tool"
   time_created: number
-  text: string
+  data: string
 }
 
 export function resolveDatabasePath() {
@@ -119,32 +130,25 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
                  p.message_id,
                  p.session_id,
                  json_extract(m.data, '$.role') AS role,
+                 json_extract(p.data, '$.type') AS type,
                  p.time_created,
-                 json_extract(p.data, '$.text') AS text,
+                 p.data,
                  row_number() OVER (ORDER BY p.time_created ASC, p.id ASC) AS rn
           FROM part p
           JOIN message m ON m.id = p.message_id
           WHERE p.session_id = ?
-            AND json_extract(p.data, '$.type') = 'text'
+            AND json_extract(p.data, '$.type') IN ('text', 'reasoning', 'tool')
             AND json_extract(m.data, '$.role') IN ('user', 'assistant')
         ), hit AS (
           SELECT rn FROM visible WHERE id = ?
         )
-        SELECT id, message_id, session_id, role, time_created, text
+        SELECT id, message_id, session_id, role, type, time_created, data
         FROM visible
         WHERE rn BETWEEN (SELECT rn FROM hit) - ? AND (SELECT rn FROM hit) + ?
         ORDER BY time_created ASC, id ASC
       `)
       .all(result.sessionID, result.id, options?.before ?? 12, options?.after ?? 24)
-      .map((row) => ({
-        id: row.id,
-        messageID: row.message_id,
-        sessionID: row.session_id,
-        role: row.role,
-        timeCreated: row.time_created,
-        text: row.text.trim(),
-        target: row.id === result.id,
-      }))
+      .flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
   } finally {
     db.close()
   }
@@ -292,6 +296,59 @@ function isInsideCodeFence(text: string, offset: number) {
   const before = text.slice(0, offset)
   const fences = before.match(/^```/gm)
   return Boolean(fences && fences.length % 2 === 1)
+}
+
+function parseConversationPart(row: ConversationRow, target: boolean): ConversationPreviewPart | undefined {
+  const data = parsePartData(row.data)
+  if (!data) return
+  if (row.type === "tool") {
+    return {
+      id: row.id,
+      messageID: row.message_id,
+      sessionID: row.session_id,
+      role: row.role,
+      type: row.type,
+      timeCreated: row.time_created,
+      text: "",
+      tool: typeof data.tool === "string" ? data.tool : "tool",
+      state: parseToolState(data.state),
+      target,
+    }
+  }
+  const text = typeof data.text === "string" ? data.text.trim() : ""
+  if (!text) return
+  return {
+    id: row.id,
+    messageID: row.message_id,
+    sessionID: row.session_id,
+    role: row.role,
+    type: row.type,
+    timeCreated: row.time_created,
+    text,
+    target,
+  }
+}
+
+function parsePartData(data: string) {
+  try {
+    const value = JSON.parse(data) as unknown
+    if (!value || typeof value !== "object" || Array.isArray(value)) return
+    return value as Record<string, unknown>
+  } catch {
+    return
+  }
+}
+
+function parseToolState(value: unknown): ToolState | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  const state = value as Record<string, unknown>
+  if (!["pending", "running", "completed", "error"].includes(String(state.status))) return
+  return {
+    status: state.status as ToolState["status"],
+    input: state.input,
+    output: typeof state.output === "string" ? state.output : undefined,
+    error: typeof state.error === "string" ? state.error : undefined,
+  }
 }
 
 function searchRows(db: Database, query: string, limit: number, directory?: string) {
