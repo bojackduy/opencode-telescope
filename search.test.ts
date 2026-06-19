@@ -23,6 +23,23 @@ describe("session search helpers", () => {
     expect(makeSnippet("a ".repeat(100) + "needle" + " b".repeat(100), "needle")).toContain("needle")
   })
 
+  test("builds match excerpts without duplicating match text", () => {
+    const result = rowToSearchResult(
+      {
+        id: "prt_1",
+        message_id: "msg_1",
+        session_id: "ses_1",
+        session_title: "Test",
+        directory: "/tmp/project",
+        role: "assistant",
+        time_created: 1,
+        text: "Scoped search for help returns relevant rows.",
+      },
+      "help",
+    )
+    expect(`${result?.before}${result?.match}${result?.after}`).toBe("Scoped search for help returns relevant rows.")
+  })
+
   test("drops rows whose parsed text does not match", () => {
     expect(
       rowToSearchResult(

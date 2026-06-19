@@ -164,9 +164,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         <box
           width={1}
           height="100%"
-          backgroundColor={theme().accent}
           flexShrink={0}
-        />
+        >
+          <text fg={theme().accent}>▏</text>
+        </box>
         <box flexDirection="column" flexGrow={1} minHeight={0}>
         <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
           <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
@@ -309,14 +310,18 @@ const PreviewHeader = (props: { item: SearchResult | undefined; query: string; t
     <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
       {(item) => (
         <>
-          <text fg={props.theme.text} wrapMode="none" overflow="hidden">
-            <span style={{ fg: roleColor(item().role, props.theme), bold: true }}>{roleLabel(item().role)}</span>
-            <span style={{ fg: props.theme.textMuted }}> · {compactTime(item().timeCreated)}</span>
-            <span style={{ fg: props.theme.textMuted }}> · </span>
-            <span>{item().sessionTitle}</span>
-          </text>
+          <box flexShrink={0}>
+            <text fg={props.theme.text} wrapMode="none" overflow="hidden">
+              <span style={{ fg: roleColor(item().role, props.theme), bold: true }}>{roleLabel(item().role)}</span>
+              <span style={{ fg: props.theme.textMuted }}> · {compactTime(item().timeCreated)}</span>
+              <span style={{ fg: props.theme.textMuted }}> · </span>
+              <span>{item().sessionTitle}</span>
+            </text>
+          </box>
           <Show when={props.query.trim()}>
-            <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
+            <box flexShrink={0}>
+              <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
+            </box>
           </Show>
         </>
       )}

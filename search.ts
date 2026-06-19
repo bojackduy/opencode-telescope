@@ -220,18 +220,25 @@ function findMatch(text: string, query: string, radius = 96) {
   const lineStart = text.lastIndexOf("\n", start - 1) + 1
   const nextLine = text.indexOf("\n", end)
   const lineEnd = nextLine === -1 ? text.length : nextLine
-  const line = text.slice(lineStart, lineEnd).replace(/\s+/g, " ").trim()
+  const line = text.slice(lineStart, lineEnd)
   const lineMatchStart = Math.max(0, start - lineStart)
+  const lineMatchEnd = lineMatchStart + needle.length
   const excerptStart = Math.max(0, lineMatchStart - radius)
-  const excerptEnd = Math.min(line.length, lineMatchStart + needle.length + radius)
+  const excerptEnd = Math.min(line.length, lineMatchEnd + radius)
+  const before = normalizeSnippetSegment(line.slice(excerptStart, lineMatchStart))
+  const after = normalizeSnippetSegment(line.slice(lineMatchEnd, excerptEnd))
   return {
     start,
     end,
-    before: `${excerptStart > 0 ? "..." : ""}${line.slice(excerptStart, lineMatchStart)}`,
+    before: `${excerptStart > 0 ? "..." : ""}${before}`,
     match: text.slice(start, end),
-    after: `${line.slice(lineMatchStart + needle.length, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
-    excerpt: `${excerptStart > 0 ? "..." : ""}${line.slice(excerptStart, excerptEnd)}${excerptEnd < line.length ? "..." : ""}`,
+    after: `${after}${excerptEnd < line.length ? "..." : ""}`,
+    excerpt: `${excerptStart > 0 ? "..." : ""}${normalizeSnippetSegment(line.slice(excerptStart, excerptEnd))}${excerptEnd < line.length ? "..." : ""}`,
   }
+}
+
+function normalizeSnippetSegment(value: string) {
+  return value.replace(/\s+/g, " ")
 }
 
 function focusedPreview(text: string, matchStart: number, matchEnd: number) {
