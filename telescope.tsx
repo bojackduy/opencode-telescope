@@ -158,34 +158,29 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       width={popupWidth()}
       height={height()}
       marginTop={verticalOffset()}
-      border
-      borderStyle="rounded"
-      borderColor={theme().border}
       backgroundColor={theme().backgroundPanel}
     >
-        <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={2} flexShrink={0}>
-          <box
-            flexDirection="row"
-            gap={1}
-            paddingLeft={1}
-            paddingRight={1}
-            paddingTop={1}
-            paddingBottom={1}
-            border
-            borderStyle="rounded"
-            borderColor={theme().borderActive}
-            backgroundColor={theme().backgroundElement}
-            flexShrink={0}
-          >
-            <text fg={theme().accent}>search</text>
-            <text fg={theme().textMuted}>›</text>
+      <box flexDirection="row" flexGrow={1} minHeight={0}>
+        <box
+          width={1}
+          height="100%"
+          backgroundColor={theme().accent}
+          flexShrink={0}
+        />
+        <box flexDirection="column" flexGrow={1} minHeight={0}>
+        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
+          <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
+            <text fg={theme().text}><span style={{ bold: true }}>Search conversations</span></text>
+            <text fg={theme().textMuted} onMouseUp={props.onClose}>esc</text>
+          </box>
+          <box flexDirection="row" gap={1} flexShrink={0}>
             <input
               ref={(element: InputRenderable) => (input = element)}
               placeholder="grep conversations..."
               placeholderColor={theme().textMuted}
               cursorColor={theme().primary}
               focusedTextColor={theme().text}
-              focusedBackgroundColor={theme().backgroundElement}
+              focusedBackgroundColor={theme().backgroundPanel}
               onInput={(value) => setQuery(value)}
               onKeyDown={(evt: ParsedKey) => {
                 if (evt.ctrl && isKey(evt, "d")) {
@@ -201,7 +196,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         </box>
 
         <box flexDirection="row" flexGrow={1} minHeight={0}>
-          <box width={leftWidth()} flexDirection="column" minHeight={0} border={["right"]} borderColor={theme().border}>
+          <box width={leftWidth()} flexDirection="column" minHeight={0} backgroundColor={theme().backgroundPanel}>
             <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: false }}>
               <Show
                 when={!error()}
@@ -231,7 +226,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             </scrollbox>
           </box>
 
-          <box flexGrow={1} flexDirection="column" minHeight={0}>
+          <box width={1} backgroundColor={theme().backgroundElement} flexShrink={0} />
+
+          <box flexGrow={1} flexDirection="column" minHeight={0} backgroundColor={theme().background}>
             <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
             <scrollbox ref={(element: ScrollBoxRenderable) => (previewScroll = element)} flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: true }}>
               <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
@@ -241,12 +238,18 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
           </box>
         </box>
 
-        <box paddingLeft={1} paddingRight={1} flexDirection="row" gap={2} border={["top"]} borderColor={theme().border}>
-          <text fg={theme().textMuted}>^J/^K move</text>
-          <text fg={theme().textMuted}>^D/^U preview</text>
-          <text fg={theme().textMuted}>enter open session</text>
-          <text fg={theme().textMuted}>esc close</text>
+        <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
+          <box flexDirection="row" gap={2}>
+            <text fg={theme().textMuted}>^J/^K move</text>
+            <text fg={theme().textMuted}>^D/^U preview</text>
+          </box>
+          <box flexDirection="row" gap={2}>
+            <text fg={theme().textMuted}>enter open</text>
+            <text fg={theme().textMuted}>esc close</text>
+          </box>
         </box>
+        </box>
+      </box>
     </box>
     </box>
   )
@@ -263,12 +266,10 @@ const ResultRow = (props: {
 }) => (
   <box
     flexDirection="column"
-    paddingLeft={1}
-    paddingRight={1}
+    paddingLeft={2}
+    paddingRight={2}
     paddingTop={0}
-    paddingBottom={0}
-    border={["bottom"]}
-    borderColor={props.theme.borderSubtle}
+    paddingBottom={1}
     backgroundColor={props.active ? props.theme.backgroundElement : undefined}
     onMouseOver={props.onMouseOver}
     onMouseUp={props.onOpen}
@@ -304,7 +305,7 @@ const ResultRow = (props: {
 )
 
 const PreviewHeader = (props: { item: SearchResult | undefined; query: string; theme: TuiThemeCurrent }) => (
-  <box paddingLeft={1} paddingRight={1} paddingBottom={1} flexDirection="column" border={["bottom"]} borderColor={props.theme.border}>
+  <box paddingLeft={1} paddingRight={1} paddingBottom={1} flexDirection="column" backgroundColor={props.theme.backgroundPanel}>
     <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
       {(item) => (
         <>
