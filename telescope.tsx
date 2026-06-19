@@ -305,11 +305,15 @@ const PreviewHeader = (props: { item: SearchResult | undefined; query: string; t
     <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
       {(item) => (
         <>
-          <text fg={props.theme.text} wrapMode="none" overflow="hidden">Session: {item().sessionTitle}</text>
-          <text fg={props.theme.textMuted}>
-            Author: {item().role} · Time: {formatTime(item().timeCreated)}
+          <text fg={props.theme.text} wrapMode="none" overflow="hidden">
+            <span style={{ fg: roleColor(item().role, props.theme), bold: true }}>{roleLabel(item().role)}</span>
+            <span style={{ fg: props.theme.textMuted }}> · {compactTime(item().timeCreated)}</span>
+            <span style={{ fg: props.theme.textMuted }}> · </span>
+            <span>{item().sessionTitle}</span>
           </text>
-          <text fg={props.theme.textMuted}>Query: {props.query.trim() || "recent messages"}</text>
+          <Show when={props.query.trim()}>
+            <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
+          </Show>
         </>
       )}
     </Show>
@@ -466,10 +470,6 @@ const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
     <text fg={props.theme.textMuted}>{props.query.trim() ? "No matching user/assistant conversation text." : "No recent conversation text found."}</text>
   </box>
 )
-
-function formatTime(time: number) {
-  return new Date(time).toLocaleString()
-}
 
 function compactTime(time: number) {
   const date = new Date(time)
