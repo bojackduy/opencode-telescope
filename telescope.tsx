@@ -305,11 +305,18 @@ const ResultRow = (props: {
 )
 
 const PreviewHeader = (props: { item: SearchResult | undefined; query: string; theme: TuiThemeCurrent }) => (
-  <box paddingLeft={1} paddingRight={1} paddingBottom={1} flexDirection="column" backgroundColor={props.theme.backgroundPanel}>
+  <box
+    paddingLeft={1}
+    paddingRight={1}
+    height={props.query.trim() ? 3 : 2}
+    flexDirection="column"
+    backgroundColor={props.theme.backgroundPanel}
+    flexShrink={0}
+  >
     <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
       {(item) => (
         <>
-          <box flexShrink={0}>
+          <box width="100%" flexShrink={0}>
             <text fg={props.theme.text} wrapMode="none" overflow="hidden">
               <span style={{ fg: roleColor(item().role, props.theme), bold: true }}>{roleLabel(item().role)}</span>
               <span style={{ fg: props.theme.textMuted }}> · {compactTime(item().timeCreated)}</span>
@@ -318,7 +325,7 @@ const PreviewHeader = (props: { item: SearchResult | undefined; query: string; t
             </text>
           </box>
           <Show when={props.query.trim()}>
-            <box flexShrink={0}>
+            <box width="100%" flexShrink={0}>
               <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
             </box>
           </Show>
@@ -381,7 +388,7 @@ const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchRes
 const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
   <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
     <Show when={props.part.target}>
-      <TargetMarker role="assistant" time={props.part.timeCreated} theme={props.theme} />
+      <TargetMarker part={props.part} item={props.item} role="assistant" time={props.part.timeCreated} theme={props.theme} />
     </Show>
     <markdown
       syntaxStyle={props.syntax}
@@ -401,7 +408,7 @@ const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: Sy
     <Show when={summary().title || summary().body}>
       <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
         <Show when={props.part.target}>
-          <TargetMarker role="thought" time={props.part.timeCreated} theme={props.theme} />
+          <TargetMarker part={props.part} role="thought" time={props.part.timeCreated} theme={props.theme} />
         </Show>
         <text fg={props.theme.warning} wrapMode="none">
           <span>Thought</span>
@@ -438,7 +445,7 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiTheme
   return (
     <box id={`tool-inline-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
       <Show when={props.part.target}>
-        <TargetMarker role="tool" time={props.part.timeCreated} theme={props.theme} />
+        <TargetMarker part={props.part} role="tool" time={props.part.timeCreated} theme={props.theme} />
       </Show>
       <text fg={color()} wrapMode="none" overflow="hidden">
         <span style={{ fg: failed() ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
@@ -456,11 +463,22 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiTheme
   )
 }
 
-const TargetMarker = (props: { role: string; time: number; theme: TuiThemeCurrent }) => (
-  <text fg={props.theme.warning} wrapMode="none" overflow="hidden">
-    <span>match</span>
-    <span style={{ fg: props.theme.textMuted }}> · {props.role} · {compactTime(props.time)}</span>
-  </text>
+const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResult; role: string; time: number; theme: TuiThemeCurrent }) => (
+  <box flexDirection="column" flexShrink={0}>
+    <text fg={props.theme.warning} wrapMode="none" overflow="hidden">
+      <span>match</span>
+      <span style={{ fg: props.theme.textMuted }}> · {props.role} · {compactTime(props.time)}</span>
+    </text>
+    <Show when={props.item && matchExcerpt(props.part.text, props.item.match)}>
+      {(excerpt) => (
+        <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
+          <span>{excerpt().before}</span>
+          <span style={{ fg: props.theme.warning, bold: true }}>{excerpt().match}</span>
+          <span>{excerpt().after}</span>
+        </text>
+      )}
+    </Show>
+  </box>
 )
 
 const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
@@ -629,6 +647,21 @@ function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult)
   const hit = conversationMatch(part, item)
   if (!hit || !item.previewHighlight) return part.text
   return markdownWithMatch(part.text.slice(0, hit.start), part.text.slice(hit.start, hit.end), part.text.slice(hit.end), true)
+}
+
+function matchExcerpt(text: string, query: string, radius = 80) {
+  const needle = query.trim()
+  if (!needle) return
+  const start = text.toLowerCase().indexOf(needle.toLowerCase())
+  if (start === -1) return
+  const end = start + needle.length
+  const beforeStart = Math.max(0, start - radius)
+  const afterEnd = Math.min(text.length, end + radius)
+  return {
+    before: `${beforeStart > 0 ? "..." : ""}${text.slice(beforeStart, start).replace(/\s+/g, " ")}`,
+    match: text.slice(start, end),
+    after: `${text.slice(end, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
+  }
 }
 
 function reasoningSummary(text: string) {
