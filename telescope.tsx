@@ -3,12 +3,20 @@ import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { SyntaxStyle, type InputRenderable, type ParsedKey, type ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
-import { recentSessionMessages, resolveDatabasePath, searchSessionMessages, type SearchResult } from "./search.ts"
+import {
+  loadConversationWindow,
+  recentSessionMessages,
+  resolveDatabasePath,
+  searchSessionMessages,
+  type ConversationPreviewPart,
+  type SearchResult,
+} from "./search.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => {
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
   const [results, setResults] = createSignal<SearchResult[]>([])
+  const [previewParts, setPreviewParts] = createSignal<ConversationPreviewPart[]>([])
   const [selected, setSelected] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
@@ -78,8 +86,23 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   })
 
   createEffect(() => {
-    selectedResult()
-    previewScroll?.scrollTo(0)
+    const item = selectedResult()
+    if (!item) {
+      setPreviewParts([])
+      return
+    }
+    try {
+      setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath }))
+    } catch {
+      setPreviewParts([])
+    }
+  })
+
+  createEffect(() => {
+    const item = selectedResult()
+    previewParts()
+    if (!item) return
+    setTimeout(() => scrollPreviewToTarget(previewScroll, previewTargetID(item)), 1)
   })
 
   const open = () => {
@@ -212,7 +235,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
             <scrollbox ref={(element: ScrollBoxRenderable) => (previewScroll = element)} flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: true }}>
               <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
-                {(item) => <SelectedPreview item={item()} syntax={syntax()} theme={theme()} />}
+                {(item) => <ConversationPreview item={item()} parts={previewParts()} syntax={syntax()} theme={theme()} />}
               </Show>
             </scrollbox>
           </box>
@@ -309,54 +332,76 @@ const HighlightedText = (props: {
   </text>
 )
 
-const SelectedPreview = (props: { item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
+const ConversationPreview = (props: { item: SearchResult; parts: ConversationPreviewPart[]; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
   <box flexDirection="column" paddingTop={1}>
-    <Show
-      when={props.item.role === "assistant" && props.item.previewMode === "markdown"}
-      fallback={
-        <box
-          border={props.item.role === "user" ? ["left"] : undefined}
-          borderColor={props.item.role === "user" ? props.theme.primary : undefined}
-          paddingLeft={props.item.role === "user" ? 2 : 0}
-          paddingRight={1}
-          backgroundColor={props.item.role === "user" ? props.theme.backgroundPanel : undefined}
-        >
-          <FocusedTextPreview
-            before={props.item.previewBefore}
-            match={props.item.previewMatch}
-            after={props.item.previewAfter}
-            theme={props.theme}
-          />
-        </box>
-      }
-    >
-      <box paddingLeft={3} paddingRight={1}>
-        <markdown
-          syntaxStyle={props.syntax}
-          content={markdownWithMatch(props.item.previewBefore, props.item.previewMatch, props.item.previewAfter, props.item.previewHighlight)}
-          streaming={true}
-          internalBlockMode="top-level"
-          tableOptions={{ style: "grid" }}
-          fg={props.theme.markdownText}
-          bg={props.theme.background}
-        />
-      </box>
+    <Show when={props.parts.length > 0} fallback={<ConversationFallback item={props.item} syntax={props.syntax} theme={props.theme} />}>
+      <For each={props.parts}>
+        {(part) => (
+          <Show
+            when={part.role === "assistant"}
+            fallback={<PreviewUserPart part={part} item={props.item} theme={props.theme} />}
+          >
+            <PreviewAssistantPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
+          </Show>
+        )}
+      </For>
     </Show>
   </box>
 )
 
-const FocusedTextPreview = (props: { before: string; match: string; after: string; theme: TuiThemeCurrent }) => (
-  <box flexDirection="column">
-    <For each={splitPreviewLines(props.before, props.match, props.after)}>
-      {(line) => (
-        <text>
-          <span style={{ fg: props.theme.markdownText }}>{line.before}</span>
-          <span style={{ fg: props.theme.warning }}>{line.match}</span>
-          <span style={{ fg: props.theme.markdownText }}>{line.after}</span>
+const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => (
+  <box
+    id={props.part.messageID}
+    border={["left"]}
+    borderColor={props.part.target ? props.theme.warning : props.theme.primary}
+    marginTop={1}
+  >
+    <box paddingTop={1} paddingBottom={1} paddingLeft={2} backgroundColor={props.theme.backgroundPanel} flexDirection="column">
+      <text fg={props.theme.textMuted}>you · {compactTime(props.part.timeCreated)}</text>
+      <HighlightedConversationText part={props.part} item={props.item} theme={props.theme} />
+    </box>
+  </box>
+)
+
+const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
+  <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
+    <Show when={props.part.target}>
+      <text fg={props.theme.warning}>matched assistant · {compactTime(props.part.timeCreated)}</text>
+    </Show>
+    <markdown
+      syntaxStyle={props.syntax}
+      streaming={true}
+      internalBlockMode="top-level"
+      content={conversationMarkdown(props.part, props.item)}
+      tableOptions={{ style: "grid" }}
+      fg={props.theme.markdownText}
+      bg={props.theme.background}
+    />
+  </box>
+)
+
+const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
+  const match = createMemo(() => conversationMatch(props.part, props.item))
+  return (
+    <Show when={match()} fallback={<text fg={props.theme.text}>{props.part.text}</text>}>
+      {(hit) => (
+        <text fg={props.theme.text}>
+          <span>{props.part.text.slice(0, hit().start)}</span>
+          <span style={{ fg: props.theme.warning, bold: true }}>{props.part.text.slice(hit().start, hit().end)}</span>
+          <span>{props.part.text.slice(hit().end)}</span>
         </text>
       )}
-    </For>
-  </box>
+    </Show>
+  )
+}
+
+const ConversationFallback = (props: { item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
+  <Show
+    when={props.item.role === "assistant"}
+    fallback={<PreviewUserPart part={searchResultPreviewPart(props.item)} item={props.item} theme={props.theme} />}
+  >
+    <PreviewAssistantPart part={searchResultPreviewPart(props.item)} item={props.item} syntax={props.syntax} theme={props.theme} />
+  </Show>
 )
 
 const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
@@ -390,6 +435,18 @@ function sessionTitleWidth(width: number) {
 
 function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
   return Math.max(1, Math.floor((scroll?.height || 10) / 8))
+}
+
+function previewTargetID(item: SearchResult) {
+  if (item.role === "assistant") return `text-${item.messageID}-${item.id}`
+  return item.messageID
+}
+
+function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
+  if (!scroll) return
+  const target = findRenderableByID(scroll, targetID)
+  if (!target) return
+  scroll.scrollBy(target.y - scroll.y - Math.max(1, Math.floor(scroll.height / 3)))
 }
 
 function renderTargetID(item: SearchResult) {
@@ -446,6 +503,40 @@ function isScrollNode(value: RenderNode): value is ScrollNode {
   return "scrollBy" in value && typeof value.scrollBy === "function"
 }
 
+function findRenderableByID(node: unknown, targetID: string): RenderNode | undefined {
+  if (!isRenderNode(node)) return
+  if (node.id === targetID) return node
+  for (const child of node.getChildren()) {
+    const result = findRenderableByID(child, targetID)
+    if (result) return result
+  }
+}
+
+function searchResultPreviewPart(item: SearchResult): ConversationPreviewPart {
+  return {
+    id: item.id,
+    messageID: item.messageID,
+    sessionID: item.sessionID,
+    role: item.role,
+    timeCreated: item.timeCreated,
+    text: item.text,
+    target: true,
+  }
+}
+
+function conversationMatch(part: ConversationPreviewPart, item: SearchResult) {
+  if (!part.target) return
+  const index = part.text.toLowerCase().indexOf(item.match.toLowerCase())
+  if (index === -1 || !item.match) return
+  return { start: index, end: index + item.match.length }
+}
+
+function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult) {
+  const hit = conversationMatch(part, item)
+  if (!hit || !item.previewHighlight) return part.text
+  return markdownWithMatch(part.text.slice(0, hit.start), part.text.slice(hit.start, hit.end), part.text.slice(hit.end), true)
+}
+
 function markdownWithMatch(before: string, match: string, after: string, highlight: boolean) {
   if (!match || !highlight) return `${before}${match}${after}`
   return `${before}**${escapeMarkdownInline(match)}**${after}`
@@ -494,20 +585,6 @@ function syntaxStyle(theme: TuiThemeCurrent) {
 
 function escapeMarkdownInline(value: string) {
   return value.replace(/[\\*_`[\]]/g, "\\$&")
-}
-
-function splitPreviewLines(before: string, match: string, after: string) {
-  const combined = `${before}\u0000${match}\u0001${after}`
-  return combined.split("\n").map((line) => {
-    const matchStart = line.indexOf("\u0000")
-    const matchEnd = line.indexOf("\u0001")
-    if (matchStart === -1 || matchEnd === -1) return { before: line.replaceAll("\u0000", "").replaceAll("\u0001", ""), match: "", after: "" }
-    return {
-      before: line.slice(0, matchStart),
-      match: line.slice(matchStart + 1, matchEnd),
-      after: line.slice(matchEnd + 1),
-    }
-  })
 }
 
 function truncate(value: string, length: number) {

@@ -26,12 +26,31 @@ export type SearchResult = {
   text: string
 }
 
+export type ConversationPreviewPart = {
+  id: string
+  messageID: string
+  sessionID: string
+  role: "user" | "assistant"
+  timeCreated: number
+  text: string
+  target: boolean
+}
+
 type Row = {
   id: string
   message_id: string
   session_id: string
   session_title: string | null
   directory: string
+  role: "user" | "assistant"
+  time_created: number
+  text: string
+}
+
+type ConversationRow = {
+  id: string
+  message_id: string
+  session_id: string
   role: "user" | "assistant"
   time_created: number
   text: string
@@ -85,6 +104,47 @@ export function recentSessionMessages(options?: { limit?: number; dbPath?: strin
     return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory).flatMap(
       (row) => rowToSearchResult(row, "") ?? [],
     )
+  } finally {
+    db.close()
+  }
+}
+
+export function loadConversationWindow(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }) {
+  const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
+  try {
+    return db
+      .query<ConversationRow, [string, string, number, number]>(`
+        WITH visible AS (
+          SELECT p.id,
+                 p.message_id,
+                 p.session_id,
+                 json_extract(m.data, '$.role') AS role,
+                 p.time_created,
+                 json_extract(p.data, '$.text') AS text,
+                 row_number() OVER (ORDER BY p.time_created ASC, p.id ASC) AS rn
+          FROM part p
+          JOIN message m ON m.id = p.message_id
+          WHERE p.session_id = ?
+            AND json_extract(p.data, '$.type') = 'text'
+            AND json_extract(m.data, '$.role') IN ('user', 'assistant')
+        ), hit AS (
+          SELECT rn FROM visible WHERE id = ?
+        )
+        SELECT id, message_id, session_id, role, time_created, text
+        FROM visible
+        WHERE rn BETWEEN (SELECT rn FROM hit) - ? AND (SELECT rn FROM hit) + ?
+        ORDER BY time_created ASC, id ASC
+      `)
+      .all(result.sessionID, result.id, options?.before ?? 12, options?.after ?? 24)
+      .map((row) => ({
+        id: row.id,
+        messageID: row.message_id,
+        sessionID: row.session_id,
+        role: row.role,
+        timeCreated: row.time_created,
+        text: row.text.trim(),
+        target: row.id === result.id,
+      }))
   } finally {
     db.close()
   }
