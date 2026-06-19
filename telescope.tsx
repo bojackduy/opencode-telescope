@@ -337,17 +337,19 @@ const ConversationPreview = (props: { item: SearchResult; parts: ConversationPre
     <Show when={props.parts.length > 0} fallback={<ConversationFallback item={props.item} syntax={props.syntax} theme={props.theme} />}>
       <For each={props.parts}>
         {(part) => (
-          <Show
-            when={part.role === "assistant"}
-            fallback={<PreviewUserPart part={part} item={props.item} theme={props.theme} />}
-          >
-            <PreviewAssistantPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
-          </Show>
+          <PreviewConversationPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
         )}
       </For>
     </Show>
   </box>
 )
+
+const PreviewConversationPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  if (props.part.type === "tool") return <PreviewToolPart part={props.part} theme={props.theme} />
+  if (props.part.type === "reasoning") return <PreviewReasoningPart part={props.part} syntax={props.syntax} theme={props.theme} />
+  if (props.part.role === "assistant") return <PreviewAssistantPart part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
+  return <PreviewUserPart part={props.part} item={props.item} theme={props.theme} />
+}
 
 const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => (
   <box
@@ -379,6 +381,61 @@ const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: Sear
     />
   </box>
 )
+
+const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  const summary = createMemo(() => reasoningSummary(props.part.text.replace("[REDACTED]", "").trim()))
+  return (
+    <Show when={summary().title || summary().body}>
+      <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
+        <text fg={props.theme.warning} wrapMode="none">
+          <span>Thought</span>
+          <Show when={summary().title}>
+            <span>: {summary().title}</span>
+          </Show>
+        </text>
+        <Show when={summary().body}>
+          <box paddingLeft={2} marginTop={1}>
+            <markdown
+              syntaxStyle={props.syntax}
+              streaming={true}
+              internalBlockMode="top-level"
+              content={summary().body}
+              tableOptions={{ style: "grid" }}
+              fg={props.theme.textMuted}
+              bg={props.theme.background}
+            />
+          </box>
+        </Show>
+      </box>
+    </Show>
+  )
+}
+
+const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiThemeCurrent }) => {
+  const status = createMemo(() => props.part.state?.status ?? "pending")
+  const failed = createMemo(() => status() === "error")
+  const color = createMemo(() => {
+    if (failed()) return props.theme.error
+    if (status() === "completed") return props.theme.textMuted
+    return props.theme.text
+  })
+  return (
+    <box id={`tool-inline-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
+      <text fg={color()} wrapMode="none" overflow="hidden">
+        <span style={{ fg: failed() ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
+        <span>{toolLabel(props.part.tool)}</span>
+        <span style={{ fg: props.theme.textMuted }}> {toolInputSummary(props.part.state?.input)}</span>
+        <span style={{ fg: props.theme.textMuted }}> · {status()}</span>
+      </text>
+      <Show when={props.part.state?.error}>
+        {(error) => <text fg={props.theme.error}>{error()}</text>}
+      </Show>
+      <Show when={props.part.state?.output && failed()}>
+        {(output) => <text fg={props.theme.textMuted}>{truncate(output().trim(), 300)}</text>}
+      </Show>
+    </box>
+  )
+}
 
 const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
   const match = createMemo(() => conversationMatch(props.part, props.item))
@@ -518,6 +575,7 @@ function searchResultPreviewPart(item: SearchResult): ConversationPreviewPart {
     messageID: item.messageID,
     sessionID: item.sessionID,
     role: item.role,
+    type: "text",
     timeCreated: item.timeCreated,
     text: item.text,
     target: true,
@@ -535,6 +593,41 @@ function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult)
   const hit = conversationMatch(part, item)
   if (!hit || !item.previewHighlight) return part.text
   return markdownWithMatch(part.text.slice(0, hit.start), part.text.slice(hit.start, hit.end), part.text.slice(hit.end), true)
+}
+
+function reasoningSummary(text: string) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
+  const title = lines[0] ? truncate(lines[0].replace(/^#+\s*/, ""), 90) : null
+  return {
+    title,
+    body: lines.slice(1).join("\n").trim(),
+  }
+}
+
+function toolIcon(tool: string | undefined) {
+  if (tool === "bash") return "$"
+  if (tool === "read") return "R"
+  if (tool === "grep") return "G"
+  if (tool === "glob") return "*"
+  if (tool === "write" || tool === "edit" || tool === "apply_patch") return "W"
+  if (tool === "task") return "T"
+  if (tool === "todowrite") return "☑"
+  if (tool === "webfetch" || tool === "websearch") return "@"
+  if (tool === "skill") return "S"
+  if (tool === "question") return "?"
+  return "⚙"
+}
+
+function toolLabel(tool: string | undefined) {
+  return tool ?? "tool"
+}
+
+function toolInputSummary(input: unknown) {
+  if (!input || typeof input !== "object") return ""
+  const record = input as Record<string, unknown>
+  const value = record.command ?? record.filePath ?? record.pattern ?? record.url ?? record.description ?? record.name
+  if (typeof value === "string") return truncate(value.replace(/\s+/g, " "), 90)
+  return truncate(JSON.stringify(record), 90)
 }
 
 function markdownWithMatch(before: string, match: string, after: string, highlight: boolean) {
