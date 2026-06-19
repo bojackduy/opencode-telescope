@@ -164,10 +164,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         <box
           width={1}
           height="100%"
+          backgroundColor={theme().accent}
           flexShrink={0}
-        >
-          <text fg={theme().accent}>▏</text>
-        </box>
+        />
         <box flexDirection="column" flexGrow={1} minHeight={0}>
         <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
           <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
