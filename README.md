@@ -10,7 +10,7 @@ Add the plugin to your `opencode.json` (or `tui.json`):
 
 ```jsonc
 {
-  "plugin": ["opencode-telescope"]
+  "plugin": ["@bojackduy/opencode-telescope"]
 }
 ```
 

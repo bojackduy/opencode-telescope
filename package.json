@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode-telescope",
+  "name": "@bojackduy/opencode-telescope",
   "version": "0.1.1",
   "description": "Telescope-style session conversation search for OpenCode TUI",
   "type": "module",
