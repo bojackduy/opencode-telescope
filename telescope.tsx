@@ -1,8 +1,10 @@
 /** @jsxImportSource @opentui/solid */
-import type { TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
-import { SyntaxStyle, type InputRenderable, type ParsedKey, type ScrollBoxRenderable } from "@opentui/core"
+import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { InputRenderable, ParsedKey, ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
+import { EmptyState, ResultRow } from "./components/result-list.tsx"
 import {
   loadConversationWindow,
   recentSessionMessages,
@@ -11,6 +13,9 @@ import {
   type ConversationPreviewPart,
   type SearchResult,
 } from "./search.ts"
+import { syntaxStyle } from "./ui/format.ts"
+import { isKey, prevent } from "./ui/keyboard.ts"
+import { jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => {
   const dimensions = useTerminalDimensions()
@@ -102,13 +107,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const item = selectedResult()
     previewParts()
     if (!item) return
-    setTimeout(() => scrollPreviewToTarget(previewScroll, previewTargetID(item)), 1)
+    setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
   })
 
   const open = () => {
     const item = selectedResult()
     if (!item) return
-    const targetID = renderTargetID(item)
+    const targetID = messageTargetID(item)
     props.api.ui.dialog.clear()
     props.api.route.navigate("session", { sessionID: item.sessionID })
     jumpToRenderedTarget(props.api.renderer.root, targetID)
@@ -153,616 +158,99 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   return (
     <box width="100%" alignItems="center">
-    <box
-      flexDirection="column"
-      width={popupWidth()}
-      height={height()}
-      marginTop={verticalOffset()}
-      backgroundColor={theme().backgroundPanel}
-    >
-      <box flexDirection="row" flexGrow={1} minHeight={0}>
-        <box
-          width={1}
-          height="100%"
-          backgroundColor={theme().accent}
-          flexShrink={0}
-        />
-        <box flexDirection="column" flexGrow={1} minHeight={0}>
-        <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
-          <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
-            <text fg={theme().text}><span style={{ bold: true }}>Search conversations</span></text>
-            <text fg={theme().textMuted} onMouseUp={props.onClose}>esc</text>
-          </box>
-          <box flexDirection="row" gap={1} flexShrink={0}>
-            <input
-              ref={(element: InputRenderable) => (input = element)}
-              placeholder="grep conversations..."
-              placeholderColor={theme().textMuted}
-              cursorColor={theme().primary}
-              focusedTextColor={theme().text}
-              focusedBackgroundColor={theme().backgroundPanel}
-              onInput={(value) => setQuery(value)}
-              onKeyDown={(evt: ParsedKey) => {
-                if (evt.ctrl && isKey(evt, "d")) {
-                  scrollPreview(1, evt)
-                  return
-                }
-                if (evt.ctrl && isKey(evt, "u")) scrollPreview(-1, evt)
-              }}
-              flexGrow={1}
-            />
-            <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
-          </box>
-        </box>
-
+      <box
+        flexDirection="column"
+        width={popupWidth()}
+        height={height()}
+        marginTop={verticalOffset()}
+        backgroundColor={theme().backgroundPanel}
+      >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
-          <box width={leftWidth()} flexDirection="column" minHeight={0} backgroundColor={theme().backgroundPanel}>
-            <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: false }}>
-              <Show
-                when={!error()}
-                fallback={
-                  <box flexDirection="column" paddingLeft={1} paddingTop={1}>
-                    <text fg={theme().error}>database search failed</text>
-                    <text fg={theme().textMuted}>{error()}</text>
-                  </box>
-                }
-              >
-                <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
-                  <For each={results()}>
-                    {(item, index) => (
-                      <ResultRow
-                        item={item}
-                        active={index() === selected()}
-                        width={leftWidth()}
-                        query={query()}
-                        theme={theme()}
-                        onMouseOver={() => setSelected(index())}
-                        onOpen={open}
-                      />
-                    )}
-                  </For>
-                </Show>
-              </Show>
-            </scrollbox>
-          </box>
-
-          <box width={1} backgroundColor={theme().backgroundElement} flexShrink={0} />
-
-          <box flexGrow={1} flexDirection="column" minHeight={0} backgroundColor={theme().background}>
-            <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
-            <scrollbox ref={(element: ScrollBoxRenderable) => (previewScroll = element)} flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: true }}>
-              <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
-                {(item) => <ConversationPreview item={item()} parts={previewParts()} syntax={syntax()} theme={theme()} />}
-              </Show>
-            </scrollbox>
-          </box>
-        </box>
-
-        <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
-          <box flexDirection="row" gap={2}>
-            <text fg={theme().textMuted}>^J/^K move</text>
-            <text fg={theme().textMuted}>^D/^U preview</text>
-          </box>
-          <box flexDirection="row" gap={2}>
-            <text fg={theme().textMuted}>enter open</text>
-            <text fg={theme().textMuted}>esc close</text>
-          </box>
-        </box>
-        </box>
-      </box>
-    </box>
-    </box>
-  )
-}
-
-const ResultRow = (props: {
-  item: SearchResult
-  active: boolean
-  width: number
-  query: string
-  theme: TuiThemeCurrent
-  onMouseOver: () => void
-  onOpen: () => void
-}) => (
-  <box
-    flexDirection="column"
-    paddingLeft={2}
-    paddingRight={2}
-    paddingTop={0}
-    paddingBottom={1}
-    backgroundColor={props.active ? props.theme.backgroundElement : undefined}
-    onMouseOver={props.onMouseOver}
-    onMouseUp={props.onOpen}
-  >
-    <text wrapMode="none" overflow="hidden">
-      <span style={{ fg: props.active ? props.theme.accent : props.theme.textMuted }}>
-        {props.active ? "› " : "  "}
-      </span>
-      <span style={{ fg: props.active ? props.theme.accent : props.theme.text, bold: true }}>
-        {truncate(props.item.sessionTitle, sessionTitleWidth(props.width))}
-      </span>
-      <Show when={props.width >= 48}>
-        <span style={{ fg: props.theme.textMuted }}>  </span>
-        <span style={{ fg: roleColor(props.item.role, props.theme), bold: true }}>{roleLabel(props.item.role)}</span>
-        <span style={{ fg: props.theme.textMuted }}> · {compactTime(props.item.timeCreated)}</span>
-      </Show>
-    </text>
-    <Show when={props.width < 48}>
-      <text wrapMode="none" overflow="hidden">
-        <span style={{ fg: roleColor(props.item.role, props.theme), bold: true }}>{roleLabel(props.item.role)}</span>
-        <span style={{ fg: props.theme.textMuted }}> · {compactTime(props.item.timeCreated)}</span>
-      </text>
-    </Show>
-    <HighlightedText
-      before={props.item.before}
-      match={props.item.match}
-      after={props.item.after}
-      query={props.query}
-      active={props.active}
-      theme={props.theme}
-    />
-  </box>
-)
-
-const PreviewHeader = (props: { item: SearchResult | undefined; query: string; theme: TuiThemeCurrent }) => (
-  <box
-    paddingLeft={1}
-    paddingRight={1}
-    height={props.query.trim() ? 3 : 2}
-    flexDirection="column"
-    backgroundColor={props.theme.backgroundPanel}
-    flexShrink={0}
-  >
-    <Show when={props.item} fallback={<text fg={props.theme.textMuted}>Select a hit to preview the exact matched message.</text>}>
-      {(item) => (
-        <>
-          <box width="100%" flexShrink={0}>
-            <text fg={props.theme.text} wrapMode="none" overflow="hidden">
-              <span style={{ fg: roleColor(item().role, props.theme), bold: true }}>{roleLabel(item().role)}</span>
-              <span style={{ fg: props.theme.textMuted }}> · {compactTime(item().timeCreated)}</span>
-              <span style={{ fg: props.theme.textMuted }}> · </span>
-              <span>{item().sessionTitle}</span>
-            </text>
-          </box>
-          <Show when={props.query.trim()}>
-            <box width="100%" flexShrink={0}>
-              <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
+          <box width={1} height="100%" backgroundColor={theme().accent} flexShrink={0} />
+          <box flexDirection="column" flexGrow={1} minHeight={0}>
+            <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
+              <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
+                <text fg={theme().text}><span style={{ bold: true }}>Search conversations</span></text>
+                <text fg={theme().textMuted} onMouseUp={props.onClose}>esc</text>
+              </box>
+              <box flexDirection="row" gap={1} flexShrink={0}>
+                <input
+                  ref={(element: InputRenderable) => (input = element)}
+                  placeholder="grep conversations..."
+                  placeholderColor={theme().textMuted}
+                  cursorColor={theme().primary}
+                  focusedTextColor={theme().text}
+                  focusedBackgroundColor={theme().backgroundPanel}
+                  onInput={(value) => setQuery(value)}
+                  onKeyDown={(evt: ParsedKey) => {
+                    if (evt.ctrl && isKey(evt, "d")) {
+                      scrollPreview(1, evt)
+                      return
+                    }
+                    if (evt.ctrl && isKey(evt, "u")) scrollPreview(-1, evt)
+                  }}
+                  flexGrow={1}
+                />
+                <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
+              </box>
             </box>
-          </Show>
-        </>
-      )}
-    </Show>
-  </box>
-)
 
-const HighlightedText = (props: {
-  before: string
-  match: string
-  after: string
-  query: string
-  active: boolean
-  theme: TuiThemeCurrent
-}) => (
-  <text wrapMode="none" overflow="hidden">
-    <span style={{ fg: props.theme.textMuted }}>  </span>
-    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.before}</span>
-    <span style={{ fg: props.theme.warning, bold: true }}>{props.match || props.query}</span>
-    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.after}</span>
-  </text>
-)
+            <box flexDirection="row" flexGrow={1} minHeight={0}>
+              <box width={leftWidth()} flexDirection="column" minHeight={0} backgroundColor={theme().backgroundPanel}>
+                <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: false }}>
+                  <Show
+                    when={!error()}
+                    fallback={
+                      <box flexDirection="column" paddingLeft={1} paddingTop={1}>
+                        <text fg={theme().error}>database search failed</text>
+                        <text fg={theme().textMuted}>{error()}</text>
+                      </box>
+                    }
+                  >
+                    <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
+                      <For each={results()}>
+                        {(item, index) => (
+                          <ResultRow
+                            item={item}
+                            active={index() === selected()}
+                            width={leftWidth()}
+                            query={query()}
+                            theme={theme()}
+                            onMouseOver={() => setSelected(index())}
+                            onOpen={open}
+                          />
+                        )}
+                      </For>
+                    </Show>
+                  </Show>
+                </scrollbox>
+              </box>
 
-const ConversationPreview = (props: { item: SearchResult; parts: ConversationPreviewPart[]; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
-  <box flexDirection="column" paddingTop={1}>
-    <Show when={props.parts.length > 0} fallback={<ConversationFallback item={props.item} syntax={props.syntax} theme={props.theme} />}>
-      <For each={props.parts}>
-        {(part) => (
-          <PreviewConversationPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
-        )}
-      </For>
-    </Show>
-  </box>
-)
+              <box width={1} backgroundColor={theme().backgroundElement} flexShrink={0} />
 
-const PreviewConversationPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
-  if (props.part.type === "tool") return <PreviewToolPart part={props.part} theme={props.theme} />
-  if (props.part.type === "reasoning") return <PreviewReasoningPart part={props.part} syntax={props.syntax} theme={props.theme} />
-  if (props.part.role === "assistant") return <PreviewAssistantPart part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
-  return <PreviewUserPart part={props.part} item={props.item} theme={props.theme} />
-}
+              <box flexGrow={1} flexDirection="column" minHeight={0} backgroundColor={theme().background}>
+                <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
+                <scrollbox ref={(element: ScrollBoxRenderable) => (previewScroll = element)} flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: true }}>
+                  <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
+                    {(item) => <ConversationPreview item={item()} parts={previewParts()} syntax={syntax()} theme={theme()} />}
+                  </Show>
+                </scrollbox>
+              </box>
+            </box>
 
-const PreviewUserPart = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => (
-  <box
-    id={props.part.messageID}
-    border={["left"]}
-    borderColor={props.part.target ? props.theme.warning : props.theme.primary}
-    customBorderChars={splitBorderChars}
-    marginTop={1}
-  >
-    <box paddingTop={1} paddingBottom={1} paddingLeft={2} backgroundColor={props.theme.backgroundPanel} flexDirection="column">
-      <text fg={props.theme.textMuted}>you · {compactTime(props.part.timeCreated)}</text>
-      <HighlightedConversationText part={props.part} item={props.item} theme={props.theme} />
-    </box>
-  </box>
-)
-
-const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
-  <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-    <Show when={props.part.target}>
-      <TargetMarker part={props.part} item={props.item} role="assistant" time={props.part.timeCreated} theme={props.theme} />
-    </Show>
-    <markdown
-      syntaxStyle={props.syntax}
-      streaming={true}
-      internalBlockMode="top-level"
-      content={conversationMarkdown(props.part, props.item)}
-      tableOptions={{ style: "grid" }}
-      fg={props.theme.markdownText}
-      bg={props.theme.background}
-    />
-  </box>
-)
-
-const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
-  const summary = createMemo(() => reasoningSummary(props.part.text.replace("[REDACTED]", "").trim()))
-  return (
-    <Show when={summary().title || summary().body}>
-      <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
-        <Show when={props.part.target}>
-          <TargetMarker part={props.part} role="thought" time={props.part.timeCreated} theme={props.theme} />
-        </Show>
-        <text fg={props.theme.warning} wrapMode="none">
-          <span>Thought</span>
-          <Show when={summary().title}>
-            <span>: {summary().title}</span>
-          </Show>
-        </text>
-        <Show when={summary().body}>
-          <box paddingLeft={2} marginTop={1}>
-            <markdown
-              syntaxStyle={props.syntax}
-              streaming={true}
-              internalBlockMode="top-level"
-              content={summary().body}
-              tableOptions={{ style: "grid" }}
-              fg={props.theme.textMuted}
-              bg={props.theme.background}
-            />
+            <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
+              <box flexDirection="row" gap={2}>
+                <text fg={theme().textMuted}>^J/^K move</text>
+                <text fg={theme().textMuted}>^D/^U preview</text>
+              </box>
+              <box flexDirection="row" gap={2}>
+                <text fg={theme().textMuted}>enter open</text>
+                <text fg={theme().textMuted}>esc close</text>
+              </box>
+            </box>
           </box>
-        </Show>
+        </box>
       </box>
-    </Show>
-  )
-}
-
-const PreviewToolPart = (props: { part: ConversationPreviewPart; theme: TuiThemeCurrent }) => {
-  const status = createMemo(() => props.part.state?.status ?? "pending")
-  const failed = createMemo(() => status() === "error")
-  const color = createMemo(() => {
-    if (failed()) return props.theme.error
-    if (status() === "completed") return props.theme.textMuted
-    return props.theme.text
-  })
-  return (
-    <box id={`tool-inline-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
-      <Show when={props.part.target}>
-        <TargetMarker part={props.part} role="tool" time={props.part.timeCreated} theme={props.theme} />
-      </Show>
-      <text fg={color()} wrapMode="none" overflow="hidden">
-        <span style={{ fg: failed() ? props.theme.error : props.theme.textMuted }}>{toolIcon(props.part.tool)} </span>
-        <span>{toolLabel(props.part.tool)}</span>
-        <span style={{ fg: props.theme.textMuted }}> {toolInputSummary(props.part.state?.input)}</span>
-        <span style={{ fg: props.theme.textMuted }}> · {status()}</span>
-      </text>
-      <Show when={props.part.state?.error}>
-        {(error) => <text fg={props.theme.error}>{error()}</text>}
-      </Show>
-      <Show when={props.part.state?.output && failed()}>
-        {(output) => <text fg={props.theme.textMuted}>{truncate(output().trim(), 300)}</text>}
-      </Show>
     </box>
   )
-}
-
-const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResult; role: string; time: number; theme: TuiThemeCurrent }) => (
-  <box flexDirection="column" flexShrink={0}>
-    <text fg={props.theme.warning} wrapMode="none" overflow="hidden">
-      <span>match</span>
-      <span style={{ fg: props.theme.textMuted }}> · {props.role} · {compactTime(props.time)}</span>
-    </text>
-    <Show when={props.item && matchExcerpt(props.part.text, props.item.match)}>
-      {(excerpt) => (
-        <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
-          <span>{excerpt().before}</span>
-          <span style={{ fg: props.theme.warning, bold: true }}>{excerpt().match}</span>
-          <span>{excerpt().after}</span>
-        </text>
-      )}
-    </Show>
-  </box>
-)
-
-const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
-  const match = createMemo(() => conversationMatch(props.part, props.item))
-  return (
-    <Show when={match()} fallback={<text fg={props.theme.text}>{props.part.text}</text>}>
-      {(hit) => (
-        <text fg={props.theme.text}>
-          <span>{props.part.text.slice(0, hit().start)}</span>
-          <span style={{ fg: props.theme.warning, bold: true }}>{props.part.text.slice(hit().start, hit().end)}</span>
-          <span>{props.part.text.slice(hit().end)}</span>
-        </text>
-      )}
-    </Show>
-  )
-}
-
-const ConversationFallback = (props: { item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
-  <Show
-    when={props.item.role === "assistant"}
-    fallback={<PreviewUserPart part={searchResultPreviewPart(props.item)} item={props.item} theme={props.theme} />}
-  >
-    <PreviewAssistantPart part={searchResultPreviewPart(props.item)} item={props.item} syntax={props.syntax} theme={props.theme} />
-  </Show>
-)
-
-const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => (
-  <box paddingLeft={1} paddingTop={1}>
-    <text fg={props.theme.textMuted}>{props.query.trim() ? "No matching user/assistant conversation text." : "No recent conversation text found."}</text>
-  </box>
-)
-
-function compactTime(time: number) {
-  const date = new Date(time)
-  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-}
-
-function roleLabel(role: SearchResult["role"]) {
-  return role === "assistant" ? "assistant" : "you"
-}
-
-function roleColor(role: SearchResult["role"], theme: TuiThemeCurrent) {
-  return role === "assistant" ? theme.info : theme.primary
-}
-
-function sessionTitleWidth(width: number) {
-  if (width >= 54) return 28
-  if (width >= 48) return 22
-  return Math.max(18, width - 6)
-}
-
-const splitBorderChars = {
-  topLeft: "",
-  bottomLeft: "",
-  vertical: "┃",
-  topRight: "",
-  bottomRight: "",
-  horizontal: " ",
-  bottomT: "",
-  topT: "",
-  cross: "",
-  leftT: "",
-  rightT: "",
-}
-
-function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
-  return Math.max(1, Math.floor((scroll?.height || 10) / 8))
-}
-
-function previewTargetID(item: SearchResult) {
-  if (item.role === "assistant") return `text-${item.messageID}-${item.id}`
-  return item.messageID
-}
-
-function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
-  if (!scroll) return
-  const target = findRenderableByID(scroll, targetID)
-  if (!target) return
-  scroll.scrollBy(target.y - scroll.y - Math.max(1, Math.floor(scroll.height / 3)))
-}
-
-function renderTargetID(item: SearchResult) {
-  if (item.role === "assistant") return `text-${item.messageID}-${item.id}`
-  return item.messageID
-}
-
-function jumpToRenderedTarget(root: unknown, targetID: string) {
-  let attempts = 0
-  const tick = () => {
-    const hit = findRenderableTarget(root, targetID)
-    if (hit) {
-      hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
-      return
-    }
-    attempts++
-    if (attempts < 40) setTimeout(tick, 50)
-  }
-  setTimeout(tick, 50)
-}
-
-type RenderNode = {
-  id?: string
-  y: number
-  getChildren(): unknown[]
-}
-
-type ScrollNode = RenderNode & {
-  scrollBy(delta: number): void
-}
-
-function findRenderableTarget(node: unknown, targetID: string, scroll?: ScrollNode): { target: RenderNode; scroll: ScrollNode } | undefined {
-  if (!isRenderNode(node)) return
-  const nextScroll = isScrollNode(node) ? node : scroll
-  if (node.id === targetID && nextScroll) return { target: node, scroll: nextScroll }
-  for (const child of node.getChildren()) {
-    const result = findRenderableTarget(child, targetID, nextScroll)
-    if (result) return result
-  }
-}
-
-function isRenderNode(value: unknown): value is RenderNode {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      "y" in value &&
-      typeof value.y === "number" &&
-      "getChildren" in value &&
-      typeof value.getChildren === "function",
-  )
-}
-
-function isScrollNode(value: RenderNode): value is ScrollNode {
-  return "scrollBy" in value && typeof value.scrollBy === "function"
-}
-
-function findRenderableByID(node: unknown, targetID: string): RenderNode | undefined {
-  if (!isRenderNode(node)) return
-  if (node.id === targetID) return node
-  for (const child of node.getChildren()) {
-    const result = findRenderableByID(child, targetID)
-    if (result) return result
-  }
-}
-
-function searchResultPreviewPart(item: SearchResult): ConversationPreviewPart {
-  return {
-    id: item.id,
-    messageID: item.messageID,
-    sessionID: item.sessionID,
-    role: item.role,
-    type: "text",
-    timeCreated: item.timeCreated,
-    text: item.text,
-    target: true,
-  }
-}
-
-function conversationMatch(part: ConversationPreviewPart, item: SearchResult) {
-  if (!part.target) return
-  const index = part.text.toLowerCase().indexOf(item.match.toLowerCase())
-  if (index === -1 || !item.match) return
-  return { start: index, end: index + item.match.length }
-}
-
-function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult) {
-  const hit = conversationMatch(part, item)
-  if (!hit || !item.previewHighlight) return part.text
-  return markdownWithMatch(part.text.slice(0, hit.start), part.text.slice(hit.start, hit.end), part.text.slice(hit.end), true)
-}
-
-function matchExcerpt(text: string, query: string, radius = 80) {
-  const needle = query.trim()
-  if (!needle) return
-  const start = text.toLowerCase().indexOf(needle.toLowerCase())
-  if (start === -1) return
-  const end = start + needle.length
-  const beforeStart = Math.max(0, start - radius)
-  const afterEnd = Math.min(text.length, end + radius)
-  return {
-    before: `${beforeStart > 0 ? "..." : ""}${text.slice(beforeStart, start).replace(/\s+/g, " ")}`,
-    match: text.slice(start, end),
-    after: `${text.slice(end, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
-  }
-}
-
-function reasoningSummary(text: string) {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
-  const title = lines[0] ? truncate(lines[0].replace(/^#+\s*/, ""), 90) : null
-  return {
-    title,
-    body: lines.slice(1).join("\n").trim(),
-  }
-}
-
-function toolIcon(tool: string | undefined) {
-  if (tool === "bash") return "$"
-  if (tool === "read") return "R"
-  if (tool === "grep") return "G"
-  if (tool === "glob") return "*"
-  if (tool === "write" || tool === "edit" || tool === "apply_patch") return "W"
-  if (tool === "task") return "T"
-  if (tool === "todowrite") return "☑"
-  if (tool === "webfetch" || tool === "websearch") return "@"
-  if (tool === "skill") return "S"
-  if (tool === "question") return "?"
-  return "⚙"
-}
-
-function toolLabel(tool: string | undefined) {
-  return tool ?? "tool"
-}
-
-function toolInputSummary(input: unknown) {
-  if (!input || typeof input !== "object") return ""
-  const record = input as Record<string, unknown>
-  const value = record.command ?? record.filePath ?? record.pattern ?? record.url ?? record.description ?? record.name
-  if (typeof value === "string") return truncate(value.replace(/\s+/g, " "), 90)
-  return truncate(JSON.stringify(record), 90)
-}
-
-function markdownWithMatch(before: string, match: string, after: string, highlight: boolean) {
-  if (!match || !highlight) return `${before}${match}${after}`
-  return `${before}**${escapeMarkdownInline(match)}**${after}`
-}
-
-function syntaxStyle(theme: TuiThemeCurrent) {
-  return SyntaxStyle.fromTheme([
-    { scope: ["default"], style: { foreground: theme.text } },
-    { scope: ["comment", "comment.documentation"], style: { foreground: theme.syntaxComment, italic: true } },
-    { scope: ["string", "symbol", "character", "character.special"], style: { foreground: theme.syntaxString } },
-    { scope: ["number", "boolean", "float", "constant"], style: { foreground: theme.syntaxNumber } },
-    { scope: ["keyword.return", "keyword.conditional", "keyword.repeat", "keyword.coroutine", "keyword", "keyword.directive", "keyword.modifier", "keyword.exception"], style: { foreground: theme.syntaxKeyword, italic: true } },
-    { scope: ["keyword.type"], style: { foreground: theme.syntaxType, bold: true, italic: true } },
-    { scope: ["keyword.import", "keyword.export", "tag.attribute"], style: { foreground: theme.syntaxKeyword } },
-    { scope: ["keyword.function", "function.method", "variable.member", "function", "constructor"], style: { foreground: theme.syntaxFunction } },
-    { scope: ["operator", "keyword.operator", "punctuation.delimiter", "keyword.conditional.ternary", "punctuation.special", "tag.delimiter"], style: { foreground: theme.syntaxOperator } },
-    { scope: ["variable", "variable.parameter", "function.method.call", "function.call", "property", "parameter", "field"], style: { foreground: theme.syntaxVariable } },
-    { scope: ["type", "module", "class", "namespace"], style: { foreground: theme.syntaxType } },
-    { scope: ["punctuation", "punctuation.bracket"], style: { foreground: theme.syntaxPunctuation } },
-    { scope: ["variable.builtin", "type.builtin", "function.builtin", "module.builtin", "constant.builtin", "variable.super", "tag"], style: { foreground: theme.error } },
-    { scope: ["string.escape", "string.regexp"], style: { foreground: theme.syntaxKeyword } },
-    { scope: ["markup.heading"], style: { foreground: theme.markdownHeading, bold: true } },
-    { scope: ["markup.heading.1"], style: { foreground: theme.markdownHeading, bold: true, underline: true } },
-    { scope: ["markup.bold", "markup.strong"], style: { foreground: theme.markdownStrong, bold: true } },
-    { scope: ["markup.italic"], style: { foreground: theme.markdownEmph, italic: true } },
-    { scope: ["markup.list"], style: { foreground: theme.markdownListItem } },
-    { scope: ["markup.quote"], style: { foreground: theme.markdownBlockQuote, italic: true } },
-    { scope: ["markup.raw", "markup.raw.block"], style: { foreground: theme.markdownCode } },
-    { scope: ["markup.raw.inline"], style: { foreground: theme.markdownCode, background: theme.background } },
-    { scope: ["markup.link", "markup.link.url", "string.special", "string.special.url"], style: { foreground: theme.markdownLink, underline: true } },
-    { scope: ["markup.link.label", "label"], style: { foreground: theme.markdownLinkText, underline: true } },
-    { scope: ["spell", "nospell", "markup.underline"], style: { foreground: theme.text } },
-    { scope: ["conceal", "markup.strikethrough", "markup.list.unchecked", "debug"], style: { foreground: theme.textMuted } },
-    { scope: ["comment.error", "error"], style: { foreground: theme.error, italic: true, bold: true } },
-    { scope: ["comment.warning", "warning"], style: { foreground: theme.warning, italic: true, bold: true } },
-    { scope: ["comment.todo", "comment.note"], style: { foreground: theme.info, italic: true, bold: true } },
-    { scope: ["type.definition"], style: { foreground: theme.syntaxType, bold: true } },
-    { scope: ["attribute", "annotation"], style: { foreground: theme.warning } },
-    { scope: ["markup.list.checked"], style: { foreground: theme.success } },
-    { scope: ["diff.plus"], style: { foreground: theme.diffAdded, background: theme.diffAddedBg } },
-    { scope: ["diff.minus"], style: { foreground: theme.diffRemoved, background: theme.diffRemovedBg } },
-    { scope: ["diff.delta"], style: { foreground: theme.diffContext, background: theme.diffContextBg } },
-    { scope: ["info"], style: { foreground: theme.info } },
-  ])
-}
-
-function escapeMarkdownInline(value: string) {
-  return value.replace(/[\\*_`[\]]/g, "\\$&")
-}
-
-function truncate(value: string, length: number) {
-  if (value.length <= length) return value
-  return `${value.slice(0, length - 1)}…`
-}
-
-function isKey(evt: ParsedKey, ...names: string[]) {
-  return names.includes(evt.name)
-}
-
-function prevent(evt: ParsedKey) {
-  const controlled = evt as ParsedKey & {
-    preventDefault?: () => void
-    stopPropagation?: () => void
-  }
-  controlled.preventDefault?.()
-  controlled.stopPropagation?.()
 }

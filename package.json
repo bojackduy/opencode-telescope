@@ -15,6 +15,8 @@
     "tui.tsx",
     "telescope.tsx",
     "search.ts",
+    "components",
+    "ui",
     "tsconfig.json"
   ],
   "exports": {
