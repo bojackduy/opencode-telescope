@@ -13,24 +13,29 @@ const enabled = (options: unknown) => {
 const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
   if (!enabled(options)) return
 
+  const command = "opencode.telescope.sessions"
   const open = () => {
     api.ui.dialog.replace(() => <Telescope api={api} onClose={() => api.ui.dialog.clear()} />)
     api.ui.dialog.setSize("xlarge")
   }
 
-  const unregister = api.command?.register(() => [
-    {
-      title: "Telescope Sessions",
-      value: "opencode.telescope.sessions",
-      category: "Search",
-      slash: { name: "telescope", aliases: ["sessions-grep", "session-grep"] },
-      onSelect() {
-        open()
+  const unregisterKeymap = api.keymap.registerLayer({
+    commands: [
+      {
+        name: command,
+        title: "Telescope Sessions",
+        category: "Search",
+        namespace: "palette",
+        slashName: "telescope",
+        run: open,
       },
-    },
-  ])
+    ],
+    bindings: [{ key: "<leader>f", desc: "Search conversations", group: "Search", cmd: open }],
+  })
 
-  api.lifecycle.onDispose(() => unregister?.())
+  api.lifecycle.onDispose(() => {
+    unregisterKeymap()
+  })
 }
 
 const plugin: TuiPluginModule & { id: string } = {
