@@ -4,16 +4,22 @@ Telescope-style session conversation search for the OpenCode TUI.
 
 This plugin searches OpenCode's local SQLite session database directly in read-only mode, then opens the selected session with the existing TUI route.
 
-## Usage
+## Installation
 
-Add the plugin to your OpenCode `tui.json`:
+Add the plugin to your `opencode.json`:
 
 ```jsonc
 {
-  "plugin": ["../opencode-telescope"]
+  "plugin": ["@Duyyy123/opencode-telescope"],
 }
 ```
 
-The path is resolved relative to `tui.json`. If your config is somewhere else, use the matching relative path or an absolute `file://` URL.
+> To use it from a local clone:
+>
+> ```jsonc
+> "plugin": ["./path/to/opencode-telescope"]
+> ```
 
-Then run `/telescope` in OpenCode.
+## Usage
+
+Run `/telescope` or shortcut `<lead>+f` in OpenCode to search and jump to any session.
