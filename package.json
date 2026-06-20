@@ -5,9 +5,22 @@
   "description": "Telescope-style session conversation search for OpenCode TUI",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Duyyy123/opencode-telescope.git"
+  },
+  "homepage": "https://github.com/Duyyy123/opencode-telescope#readme",
+  "bugs": {
+    "url": "https://github.com/Duyyy123/opencode-telescope/issues"
+  },
+  "keywords": ["opencode", "opencode-plugin", "tui", "telescope", "search"],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepack": "bun run typecheck && bun test",
+    "release:patch": "bun run typecheck && bun test && npm version patch -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)",
+    "release:minor": "bun run typecheck && bun test && npm version minor -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)",
+    "release:major": "bun run typecheck && bun test && npm version major -m \"chore: release %s\" && git push && git push origin $(git describe --tags --abbrev=0)"
   },
   "files": [
     "README.md",
