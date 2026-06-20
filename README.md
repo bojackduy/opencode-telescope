@@ -6,11 +6,11 @@ This plugin searches OpenCode's local SQLite session database directly in read-o
 
 ## Installation
 
-Add the plugin to your `opencode.json`:
+Add the plugin to your `opencode.json` (or `tui.json`):
 
 ```jsonc
 {
-  "plugin": ["@Duyyy123/opencode-telescope"],
+  "plugin": ["opencode-telescope"]
 }
 ```
 
