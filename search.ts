@@ -67,20 +67,23 @@ type ConversationRow = {
   data: string
 }
 
+let cachedDbPath: string | undefined
+
 export function resolveDatabasePath() {
+  if (cachedDbPath) return cachedDbPath
   if (process.env.OPENCODE_DB) {
-    if (process.env.OPENCODE_DB === ":memory:" || path.isAbsolute(process.env.OPENCODE_DB)) return process.env.OPENCODE_DB
-    return path.join(candidateDataDirs()[0] ?? defaultDataDir(), process.env.OPENCODE_DB)
+    if (process.env.OPENCODE_DB === ":memory:" || path.isAbsolute(process.env.OPENCODE_DB)) return cachedDbPath = process.env.OPENCODE_DB
+    return cachedDbPath = path.join(candidateDataDirs()[0] ?? defaultDataDir(), process.env.OPENCODE_DB)
   }
   if (process.env.OPENCODE_DISABLE_CHANNEL_DB === "1" || process.env.OPENCODE_DISABLE_CHANNEL_DB === "true") {
-    return requireExistingDatabase(["opencode.db"])
+    return cachedDbPath = requireExistingDatabase(["opencode.db"])
   }
   const stable = candidateDatabasePaths(["opencode.db"]).find(existsSync)
-  if (stable) return stable
+  if (stable) return cachedDbPath = stable
   if (process.env.OPENCODE_CHANNEL) {
     const channel = process.env.OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
     const candidate = candidateDatabasePaths([`opencode-${channel}.db`]).find(existsSync)
-    if (candidate) return candidate
+    if (candidate) return cachedDbPath = candidate
   }
   const fallback = candidateDatabasePaths(["opencode.db"])[0] ?? path.join(defaultDataDir(), "opencode.db")
   try {
@@ -91,9 +94,9 @@ export function resolveDatabasePath() {
           .map((entry) => path.join(dir, entry.name)),
       )
       .at(0)
-    return discovered ?? fallback
+    return cachedDbPath = discovered ?? fallback
   } catch {
-    return fallback
+    return cachedDbPath = fallback
   }
 }
 

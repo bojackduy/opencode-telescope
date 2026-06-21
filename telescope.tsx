@@ -25,6 +25,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [selected, setSelected] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
+  const [mode, setMode] = createSignal<"normal" | "insert">("normal")
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -36,19 +37,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const leftWidth = createMemo(() => Math.max(36, Math.min(64, Math.floor(popupWidth() * 0.36))))
   const height = createMemo(() => Math.max(18, dimensions().height - 8))
   const verticalOffset = createMemo(() => Math.floor(dimensions().height / 4 - height() / 2) - 2)
-  const dbPath = resolveDatabasePath()
+  const dbPath = createMemo(() => resolveDatabasePath())
   const directory = props.api.state.path.directory
-
-  createEffect(() => {
-    setTimeout(() => input?.focus(), 1)
-  })
 
   createEffect(() => {
     const q = query().trim()
     setError("")
     if (!q) {
       try {
-        setResults(recentSessionMessages({ limit: 40, dbPath, directory }))
+        setResults(recentSessionMessages({ limit: 40, dbPath: dbPath(), directory }))
       } catch (err) {
         setResults([])
         setError(err instanceof Error ? err.message : String(err))
@@ -59,7 +56,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     setBusy(true)
     const timer = setTimeout(() => {
       try {
-        setResults(searchSessionMessages(q, { limit: 120, dbPath, directory }))
+        setResults(searchSessionMessages(q, { limit: 120, dbPath: dbPath(), directory }))
         setSelected(0)
       } catch (err) {
         setResults([])
@@ -97,7 +94,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       return
     }
     try {
-      setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath }))
+      setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath: dbPath() }))
     } catch {
       setPreviewParts([])
     }
@@ -124,35 +121,69 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     previewScroll?.scrollBy(direction * previewScrollAmount(previewScroll))
   }
 
+  const focusInput = () => {
+    input?.focus()
+  }
+
+  const blurInput = () => {
+    const el = input as (InputRenderable & { blur?: () => void }) | undefined
+    el?.blur?.()
+  }
+
+  const unregisterLayer = props.api.keymap.registerLayer({
+    commands: [],
+    bindings: [{
+      key: "<esc>",
+      desc: "Exit insert mode",
+      group: "Telescope",
+      cmd: () => {
+        if (mode() === "insert") {
+          setMode("normal")
+          blurInput()
+        }
+      },
+    }],
+  })
+  onCleanup(() => unregisterLayer())
+
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
-    if (isKey(evt, "escape", "esc") || (evt.ctrl && isKey(evt, "c"))) {
-      prevent(evt)
-      props.onClose()
-      return
-    }
-    if (isKey(evt, "down") || (evt.ctrl && isKey(evt, "j"))) {
-      prevent(evt)
-      move(1)
-      return
-    }
-    if (isKey(evt, "up") || (evt.ctrl && isKey(evt, "k"))) {
-      prevent(evt)
-      move(-1)
-      return
-    }
-    if (isKey(evt, "enter", "return")) {
-      prevent(evt)
-      open()
-      return
-    }
-    if (evt.ctrl && isKey(evt, "d")) {
-      scrollPreview(1, evt)
-      return
-    }
-    if (evt.ctrl && isKey(evt, "u")) {
-      scrollPreview(-1, evt)
-      return
+
+    if (mode() === "normal") {
+      if (isKey(evt, "q")) {
+        prevent(evt)
+        props.onClose()
+        return
+      }
+      if (isKey(evt, "j")) {
+        prevent(evt)
+        move(1)
+        return
+      }
+      if (isKey(evt, "k")) {
+        prevent(evt)
+        move(-1)
+        return
+      }
+      if (isKey(evt, "d")) {
+        scrollPreview(1, evt)
+        return
+      }
+      if (isKey(evt, "u")) {
+        scrollPreview(-1, evt)
+        return
+      }
+      if (isKey(evt, "/")) {
+        prevent(evt)
+        setMode("insert")
+        focusInput()
+        return
+      }
+      if (isKey(evt, "enter", "return")) {
+        prevent(evt)
+        open()
+        return
+      }
     }
   })
 
@@ -171,7 +202,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
               <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
                 <text fg={theme().text}><span style={{ bold: true }}>Search conversations</span></text>
-                <text fg={theme().textMuted} onMouseUp={props.onClose}>esc</text>
+                <text fg={theme().textMuted} onMouseUp={props.onClose}>q</text>
               </box>
               <box flexDirection="row" gap={1} flexShrink={0}>
                 <input
@@ -182,13 +213,6 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   focusedTextColor={theme().text}
                   focusedBackgroundColor={theme().backgroundPanel}
                   onInput={(value) => setQuery(value)}
-                  onKeyDown={(evt: ParsedKey) => {
-                    if (evt.ctrl && isKey(evt, "d")) {
-                      scrollPreview(1, evt)
-                      return
-                    }
-                    if (evt.ctrl && isKey(evt, "u")) scrollPreview(-1, evt)
-                  }}
                   flexGrow={1}
                 />
                 <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
@@ -238,16 +262,26 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
               </box>
             </box>
 
-            <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
-              <box flexDirection="row" gap={2}>
-                <text fg={theme().textMuted}>^J/^K move</text>
-                <text fg={theme().textMuted}>^D/^U preview</text>
+            <Show when={mode() === "normal"}>
+              <box paddingLeft={4} paddingRight={4} flexDirection="row" justifyContent="space-between" backgroundColor={theme().backgroundElement}>
+                <box flexDirection="row" gap={2}>
+                  <text fg={theme().textMuted}>NORMAL</text>
+                  <text fg={theme().textMuted}>j/k move</text>
+                  <text fg={theme().textMuted}>d/u scroll</text>
+                </box>
+                <box flexDirection="row" gap={2}>
+                  <text fg={theme().textMuted}>/ search</text>
+                  <text fg={theme().textMuted}>enter open</text>
+                  <text fg={theme().textMuted}>q close</text>
+                </box>
               </box>
-              <box flexDirection="row" gap={2}>
-                <text fg={theme().textMuted}>enter open</text>
-                <text fg={theme().textMuted}>esc close</text>
+            </Show>
+            <Show when={mode() === "insert"}>
+              <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement}>
+                <text fg={theme().textMuted}>INSERT  esc to normal</text>
               </box>
-            </box>
+            </Show>
+
           </box>
         </box>
       </box>
