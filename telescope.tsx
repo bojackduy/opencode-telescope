@@ -4,7 +4,7 @@ import type { InputRenderable, ParsedKey, ScrollBoxRenderable } from "@opentui/c
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
-import { EmptyState, ResultRow } from "./components/result-list.tsx"
+import { EmptyState, ResultRow, SkeletonRow } from "./components/result-list.tsx"
 import {
   loadConversationWindow,
   recentSessionMessages,
@@ -26,6 +26,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
   const [mode, setMode] = createSignal<"normal" | "insert">("normal")
+  const [loading, setLoading] = createSignal(true)
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -44,15 +45,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const q = query().trim()
     setError("")
     if (!q) {
-      try {
-        setResults(recentSessionMessages({ limit: 40, dbPath: dbPath(), directory }))
-      } catch (err) {
-        setResults([])
-        setError(err instanceof Error ? err.message : String(err))
-      }
-      setSelected(0)
+      setLoading(true)
+      const timer = setTimeout(() => {
+        try {
+          setResults(recentSessionMessages({ limit: 40, dbPath: dbPath(), directory }))
+        } catch (err) {
+          setResults([])
+          setError(err instanceof Error ? err.message : String(err))
+        }
+        setLoading(false)
+        setSelected(0)
+      }, 1)
+      onCleanup(() => clearTimeout(timer))
       return
     }
+    setLoading(true)
     setBusy(true)
     const timer = setTimeout(() => {
       try {
@@ -63,6 +70,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         setError(err instanceof Error ? err.message : String(err))
       } finally {
         setBusy(false)
+        setLoading(false)
       }
     }, 180)
     onCleanup(() => clearTimeout(timer))
@@ -133,6 +141,12 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
 
+    if (isKey(evt, "down") || isKey(evt, "up")) {
+      prevent(evt)
+      isKey(evt, "down") ? move(1) : move(-1)
+      return
+    }
+
     if (mode() === "normal") {
       if (isKey(evt, "j")) {
         prevent(evt)
@@ -142,6 +156,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       if (isKey(evt, "k")) {
         prevent(evt)
         move(-1)
+        return
+      }
+      if (isKey(evt, "q")) {
+        prevent(evt)
+        props.onClose()
         return
       }
       if (isKey(evt, "d")) {
@@ -193,6 +212,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   focusedBackgroundColor={theme().backgroundPanel}
                   onInput={(value) => setQuery(value)}
                   onKeyDown={(evt: ParsedKey) => {
+                    if (isKey(evt, "down") || isKey(evt, "up")) {
+                      prevent(evt)
+                      isKey(evt, "down") ? move(1) : move(-1)
+                      return
+                    }
                     if (evt.ctrl && isKey(evt, "q")) {
                       prevent(evt)
                       setMode("normal")
@@ -201,7 +225,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
+                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
               </box>
             </box>
 
@@ -217,20 +241,30 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                       </box>
                     }
                   >
-                    <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
-                      <For each={results()}>
-                        {(item, index) => (
-                          <ResultRow
-                            item={item}
-                            active={index() === selected()}
-                            width={leftWidth()}
-                            query={query()}
-                            theme={theme()}
-                            onMouseOver={() => setSelected(index())}
-                            onOpen={open}
-                          />
-                        )}
-                      </For>
+                    <Show when={!loading()}>
+                      <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
+                        <For each={results()}>
+                          {(item, index) => (
+                            <ResultRow
+                              item={item}
+                              active={index() === selected()}
+                              width={leftWidth()}
+                              query={query()}
+                              theme={theme()}
+                              onMouseOver={() => setSelected(index())}
+                              onOpen={open}
+                            />
+                          )}
+                        </For>
+                      </Show>
+                    </Show>
+                    <Show when={loading()}>
+                      <SkeletonRow theme={theme()} />
+                      <SkeletonRow theme={theme()} />
+                      <SkeletonRow theme={theme()} />
+                      <SkeletonRow theme={theme()} />
+                      <SkeletonRow theme={theme()} />
+                      <SkeletonRow theme={theme()} />
                     </Show>
                   </Show>
                 </scrollbox>
@@ -259,13 +293,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                 <text fg={theme().text}>/ search</text>
                 <text fg={theme().textMuted}>·</text>
                 <text fg={theme().textMuted}>enter open</text>
+                <text fg={theme().textMuted}>·</text>
+                <text fg={theme().text}>q close</text>
               </box>
             </Show>
             <Show when={mode() === "insert"}>
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
                 <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>^Q normal</text>
+                <text fg={theme().textMuted}>↑/↓ move · ^Q normal</text>
               </box>
             </Show>
 

@@ -59,6 +59,28 @@ export const EmptyState = (props: { query: string; theme: TuiThemeCurrent }) => 
   </box>
 )
 
+export const SkeletonRow = (props: { theme: TuiThemeCurrent }) => (
+  <box
+    flexDirection="column"
+    paddingLeft={2}
+    paddingRight={2}
+    paddingTop={0}
+    paddingBottom={1}
+  >
+    <text wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.theme.textMuted }}>  </span>
+      <span style={{ fg: props.theme.textMuted }}>────────────────────</span>
+      <span style={{ fg: props.theme.textMuted }}>  </span>
+      <span style={{ fg: props.theme.textMuted }}>you</span>
+      <span style={{ fg: props.theme.textMuted }}> · -- --- --:--</span>
+    </text>
+    <text wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.theme.textMuted }}>  </span>
+      <span style={{ fg: props.theme.textMuted }}>∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙ ∙</span>
+    </text>
+  </box>
+)
+
 const HighlightedText = (props: {
   before: string
   match: string
