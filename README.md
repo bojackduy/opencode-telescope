@@ -1,14 +1,21 @@
 # opencode-telescope
 
-A Neovim Telescope-like fuzzy finder for your OpenCode conversations.
+Fuzzy search across all your OpenCode conversations — grep through session history, find code snippets, and jump to any chat instantly.
 
-Grep through all your sessions with live preview — find any message, code snippet, or response instantly.
+> Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
+
+## Use cases
+
+- **"I know I discussed this somewhere"** — grep all your sessions by keyword
+- **"Find that code snippet"** — search for code you saw in a past LLM response
+- **"Revisit a decision"** — find the conversation where you chose approach X
+- **"Session journal"** — browse your entire conversation history like a timeline
 
 ## Features
 
-- **Fuzzy grep** — search across all sessions by message text
-- **Live preview** — preview the matched conversation before opening
-- **Find & jump** — select a result and jump straight to that session
+- **Fuzzy grep** — search across all session messages by text
+- **Live preview** — preview the matched conversation result before opening
+- **Find & jump** — select any result and jump straight to that session
 - **Neovim Telescope-style UX** — familiar `<leader>f` keybind and `/telescope` command
 
 ## Installation
