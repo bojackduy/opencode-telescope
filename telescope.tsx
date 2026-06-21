@@ -130,31 +130,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     el?.blur?.()
   }
 
-  const unregisterLayer = props.api.keymap.registerLayer({
-    commands: [],
-    bindings: [{
-      key: "<esc>",
-      desc: "Exit insert mode",
-      group: "Telescope",
-      cmd: () => {
-        if (mode() === "insert") {
-          setMode("normal")
-          blurInput()
-        }
-      },
-    }],
-  })
-  onCleanup(() => unregisterLayer())
-
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
 
     if (mode() === "normal") {
-      if (isKey(evt, "q")) {
-        prevent(evt)
-        props.onClose()
-        return
-      }
       if (isKey(evt, "j")) {
         prevent(evt)
         move(1)
@@ -202,7 +181,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             <box paddingLeft={4} paddingRight={4} paddingTop={1} paddingBottom={1} gap={1} flexShrink={0}>
               <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
                 <text fg={theme().text}><span style={{ bold: true }}>Search conversations</span></text>
-                <text fg={theme().textMuted} onMouseUp={props.onClose}>q</text>
+                <text fg={theme().textMuted} onMouseUp={props.onClose}>esc</text>
               </box>
               <box flexDirection="row" gap={1} flexShrink={0}>
                 <input
@@ -213,6 +192,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   focusedTextColor={theme().text}
                   focusedBackgroundColor={theme().backgroundPanel}
                   onInput={(value) => setQuery(value)}
+                  onKeyDown={(evt: ParsedKey) => {
+                    if (evt.ctrl && isKey(evt, "q")) {
+                      prevent(evt)
+                      setMode("normal")
+                      blurInput()
+                    }
+                  }}
                   flexGrow={1}
                 />
                 <text fg={theme().textMuted}>{busy() ? "searching" : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
@@ -272,13 +258,12 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                 <box flexDirection="row" gap={2}>
                   <text fg={theme().textMuted}>/ search</text>
                   <text fg={theme().textMuted}>enter open</text>
-                  <text fg={theme().textMuted}>q close</text>
                 </box>
               </box>
             </Show>
             <Show when={mode() === "insert"}>
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement}>
-                <text fg={theme().textMuted}>INSERT  esc to normal</text>
+                <text fg={theme().textMuted}>INSERT  ^Q normal</text>
               </box>
             </Show>
 
