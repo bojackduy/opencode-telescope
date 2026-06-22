@@ -306,7 +306,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? `${results().length} hits` : `${results().length} recent`}</text>
+                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? (results().length > 0 ? `${selected() + 1}/${results().length} hits` : "0 hits") : (results().length > 0 ? `${selected() + 1}/${results().length} recent` : "0 recent")}</text>
               </box>
             </box>
 

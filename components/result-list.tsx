@@ -49,6 +49,7 @@ export const ResultRow = (props: {
       query={props.query}
       active={props.active}
       theme={props.theme}
+      maxWidth={props.width}
     />
   </box>
 )
@@ -88,14 +89,23 @@ const HighlightedText = (props: {
   query: string
   active: boolean
   theme: TuiThemeCurrent
-}) => (
-  <text wrapMode="none" overflow="hidden">
-    <span style={{ fg: props.theme.textMuted }}>  </span>
-    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.before}</span>
-    <span style={{ fg: props.theme.warning, bold: true }}>{props.match || props.query}</span>
-    <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{props.after}</span>
-  </text>
-)
+  maxWidth: number
+}) => {
+  const textMax = Math.max(10, props.maxWidth - 2)
+  const sideMax = Math.floor(textMax * 0.35)
+  const matchMax = textMax - sideMax * 2
+  const before = truncate(props.before, sideMax)
+  const match = truncate(props.match || props.query, matchMax)
+  const after = truncate(props.after, sideMax)
+  return (
+    <text wrapMode="none" overflow="hidden">
+      <span style={{ fg: props.theme.textMuted }}>  </span>
+      <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{before}</span>
+      <span style={{ fg: props.theme.warning, bold: true }}>{match}</span>
+      <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{after}</span>
+    </text>
+  )
+}
 
 function sessionTitleWidth(width: number) {
   if (width >= 54) return 28
