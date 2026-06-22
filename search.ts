@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite"
 import { existsSync, readdirSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { debug } from "./ui/debug.ts"
 
 export type SearchResult = {
   id: string
@@ -124,19 +125,26 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
 }
 
 export function loadConversationWindow(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }) {
+  debug.time("preview:query:total")
   const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
   try {
     const before = options?.before ?? 3
     const after = options?.after ?? 6
 
+    debug.time("preview:query:hit")
     const hit = db.query<{ time_created: number }, [string]>(
       "SELECT time_created FROM part WHERE id = ?",
     ).get(result.id)
-    if (!hit) return []
+    debug.timeEnd("preview:query:hit")
+    if (!hit) {
+      debug.timeEnd("preview:query:total")
+      return []
+    }
 
     const fetchBefore = Math.max(before * 4, 30)
     const fetchAfter = Math.max(after * 4, 50)
 
+    debug.time("preview:query:before")
     const beforeRows = db.query<ConversationRow, [string, number, number, string, number]>(`
       SELECT p.id, p.message_id, p.session_id,
              json_extract(m.data, '$.role') AS role,
@@ -149,7 +157,9 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
       ORDER BY p.time_created DESC, p.id DESC
       LIMIT ?
     `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchBefore)
+    debug.timeEnd("preview:query:before")
 
+    debug.time("preview:query:after")
     const afterRows = db.query<ConversationRow, [string, number, number, string, number]>(`
       SELECT p.id, p.message_id, p.session_id,
              json_extract(m.data, '$.role') AS role,
@@ -162,15 +172,20 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
       ORDER BY p.time_created ASC, p.id ASC
       LIMIT ?
     `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchAfter)
+    debug.timeEnd("preview:query:after")
 
+    debug.time("preview:query:parse")
     const isValid = (row: ConversationRow) =>
       (row.role === "user" || row.role === "assistant") &&
       (row.type === "text" || row.type === "reasoning" || row.type === "tool")
 
-    return [
+    const parts = [
       ...beforeRows.filter(isValid).slice(0, before).reverse(),
       ...afterRows.filter(isValid).slice(0, after + 1),
     ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+    debug.timeEnd("preview:query:parse")
+    debug.timeEnd("preview:query:total")
+    return parts
   } finally {
     db.close()
   }

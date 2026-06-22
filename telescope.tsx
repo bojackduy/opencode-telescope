@@ -13,6 +13,7 @@ import {
   type ConversationPreviewPart,
   type SearchResult,
 } from "./search.ts"
+import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import { isKey, prevent } from "./ui/keyboard.ts"
 import { jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
@@ -59,6 +60,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     if (!q) {
       setLoading(true)
       const timer = setTimeout(() => {
+        debug.time("query:recent")
         try {
           const batch = recentSessionMessages({ limit: RECENT_BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
           setResults(batch)
@@ -68,6 +70,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
           setResults([])
           setError(err instanceof Error ? err.message : String(err))
         }
+        debug.timeEnd("query:recent")
         setLoading(false)
       }, 1)
       onCleanup(() => clearTimeout(timer))
@@ -77,6 +80,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     setLoading(true)
     setBusy(true)
     const timer = setTimeout(() => {
+      debug.time("query:search")
       try {
         const batch = searchSessionMessages(q, { limit: BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
         setResults(batch)
@@ -86,6 +90,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         setResults([])
         setError(err instanceof Error ? err.message : String(err))
       } finally {
+        debug.timeEnd("query:search")
         setBusy(false)
         setLoading(false)
       }
@@ -95,6 +100,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   const move = (delta: number) => {
     if (results().length === 0) return
+    debug.time("nav:total")
     setSelected((index) => (index + delta + results().length) % results().length)
   }
 
@@ -124,6 +130,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
     setLoadingMore(true)
     const timer = setTimeout(() => {
+      debug.time("query:load-more")
       try {
         const batch = q
           ? searchSessionMessages(q, { limit: BATCH_SIZE, offset: total, dbPath: db, directory: dir })
@@ -133,6 +140,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       } catch {
         // keep existing results on error
       } finally {
+        debug.timeEnd("query:load-more")
         setLoadingMore(false)
       }
     }, 100)
@@ -142,24 +150,24 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   let lastPreviewItemId = ""
   createEffect(() => {
     const item = selectedResult()
-    if (!item) return
-    if (item.id !== lastPreviewItemId) {
-      lastPreviewItemId = item.id
-      setPreviewRange({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
-    }
-  })
-
-  createEffect(() => {
-    const item = selectedResult()
     const range = previewRange()
     if (!item) {
       setPreviewParts([])
       return
     }
+    if (item.id !== lastPreviewItemId) {
+      lastPreviewItemId = item.id
+      debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
+      setPreviewRange({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
+      return
+    }
     const db = dbPath()
+    debug.time("preview:load")
     try {
       setPreviewParts(loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db }))
     } catch {}
+    debug.timeEnd("nav:total")
+    debug.timeEnd("preview:load")
   })
 
   createEffect(() => {
@@ -184,8 +192,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const item = selectedResult()
     previewParts()
     if (!item) return
-    if (previewParts().length === 0) return
-    queueMicrotask(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)))
+    const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
+    onCleanup(() => clearTimeout(timer))
   })
 
   const open = () => {
