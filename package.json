@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-telescope",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Fuzzy search across all OpenCode conversations — grep session and chat history, find code snippets, and jump to any chat instantly",
   "type": "module",
   "license": "MIT",
