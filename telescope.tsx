@@ -27,6 +27,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [error, setError] = createSignal("")
   const [mode, setMode] = createSignal<"normal" | "insert">("normal")
   const [loading, setLoading] = createSignal(true)
+  const [hasMore, setHasMore] = createSignal(true)
+  const [loadingMore, setLoadingMore] = createSignal(false)
+  const BATCH_SIZE = 25
+  const RECENT_BATCH_SIZE = 15
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -44,26 +48,35 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   createEffect(() => {
     const q = query().trim()
     setError("")
+    setHasMore(true)
+    const db = dbPath()
+    const dir = directory
+
     if (!q) {
       setLoading(true)
       const timer = setTimeout(() => {
         try {
-          setResults(recentSessionMessages({ limit: 40, dbPath: dbPath(), directory }))
+          const batch = recentSessionMessages({ limit: RECENT_BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
+          setResults(batch)
+          setHasMore(batch.length >= RECENT_BATCH_SIZE)
+          setSelected(0)
         } catch (err) {
           setResults([])
           setError(err instanceof Error ? err.message : String(err))
         }
         setLoading(false)
-        setSelected(0)
       }, 1)
       onCleanup(() => clearTimeout(timer))
       return
     }
+
     setLoading(true)
     setBusy(true)
     const timer = setTimeout(() => {
       try {
-        setResults(searchSessionMessages(q, { limit: 120, dbPath: dbPath(), directory }))
+        const batch = searchSessionMessages(q, { limit: BATCH_SIZE, offset: 0, dbPath: db, directory: dir })
+        setResults(batch)
+        setHasMore(batch.length >= BATCH_SIZE)
         setSelected(0)
       } catch (err) {
         setResults([])
@@ -96,16 +109,48 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   })
 
   createEffect(() => {
+    const index = selected()
+    const total = results().length
+    if (index < total - 3) return
+    if (!hasMore() || loadingMore() || busy() || loading()) return
+
+    const q = query().trim()
+    const db = dbPath()
+    const dir = directory
+
+    setLoadingMore(true)
+    const timer = setTimeout(() => {
+      try {
+        const batch = q
+          ? searchSessionMessages(q, { limit: BATCH_SIZE, offset: total, dbPath: db, directory: dir })
+          : recentSessionMessages({ limit: RECENT_BATCH_SIZE, offset: total, dbPath: db, directory: dir })
+        setResults((prev) => [...prev, ...batch])
+        if (batch.length < (q ? BATCH_SIZE : RECENT_BATCH_SIZE)) setHasMore(false)
+      } catch {
+        // keep existing results on error
+      } finally {
+        setLoadingMore(false)
+      }
+    }, 100)
+    onCleanup(() => clearTimeout(timer))
+  })
+
+  createEffect(() => {
     const item = selectedResult()
     if (!item) {
       setPreviewParts([])
       return
     }
-    try {
-      setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath: dbPath() }))
-    } catch {
-      setPreviewParts([])
-    }
+    const db = dbPath()
+    setPreviewParts([])
+    const timer = setTimeout(() => {
+      try {
+        setPreviewParts(loadConversationWindow(item, { before: 12, after: 24, dbPath: db }))
+      } catch {
+        setPreviewParts([])
+      }
+    }, 200)
+    onCleanup(() => clearTimeout(timer))
   })
 
   createEffect(() => {
@@ -256,6 +301,12 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                             />
                           )}
                         </For>
+                        <Show when={loadingMore()}>
+                          <SkeletonRow theme={theme()} />
+                        </Show>
+                        <Show when={!hasMore() && results().length > 0}>
+                          <text fg={theme().textMuted}>  no more results</text>
+                        </Show>
                       </Show>
                     </Show>
                     <Show when={loading()}>

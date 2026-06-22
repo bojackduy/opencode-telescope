@@ -100,22 +100,22 @@ export function resolveDatabasePath() {
   }
 }
 
-export function searchSessionMessages(query: string, options?: { limit?: number; dbPath?: string; directory?: string }) {
+export function searchSessionMessages(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
   const term = query.trim()
   if (!term) return []
   if (options?.dbPath === ":memory:") return []
   const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
   try {
-    return searchRows(db, term, options?.limit ?? 80, options?.directory)
+    return searchRows(db, term, options?.limit ?? 80, options?.directory, options?.offset)
   } finally {
     db.close()
   }
 }
 
-export function recentSessionMessages(options?: { limit?: number; dbPath?: string; directory?: string }) {
+export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
   const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
   try {
-    return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory).flatMap(
+    return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset).flatMap(
       (row) => rowToSearchResult(row, "") ?? [],
     )
   } finally {
@@ -361,16 +361,18 @@ function parseToolState(value: unknown): ToolState | undefined {
   }
 }
 
-function searchRows(db: Database, query: string, limit: number, directory?: string) {
+function searchRows(db: Database, query: string, limit: number, directory?: string, offset?: number) {
   if (!tableExists(db, "part") || !tableExists(db, "message")) return []
-  return visibleTextRows(db, limit, query, directory).flatMap((row) => rowToSearchResult(row, query) ?? [])
+  return visibleTextRows(db, limit, query, directory, offset).flatMap((row) => rowToSearchResult(row, query) ?? [])
 }
 
-function visibleTextRows(db: Database, limit: number, query?: string, directory?: string) {
+function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number) {
+  const offsetClause = offset ? "OFFSET ?" : ""
   if (query) {
-    const input = directory ? [directory, `%${query}%`, limit] satisfies [string, string, number] : [`%${query}%`, limit] satisfies [string, number]
+    const params: (string | number)[] = directory ? [directory, `%${query}%`, limit] : [`%${query}%`, limit]
+    if (offset) params.push(offset)
     return db
-      .query<Row, [string, string, number] | [string, number]>(`
+      .query<Row, (string | number)[]>(`
         SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
                json_extract(m.data, '$.role') AS role,
                p.time_created,
@@ -383,13 +385,14 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
           ${directory ? "AND s.directory = ?" : ""}
           AND json_extract(p.data, '$.text') LIKE ?
         ORDER BY p.time_created DESC
-        LIMIT ?
+        LIMIT ? ${offsetClause}
       `)
-      .all(...input)
+      .all(...params as [string, string, number] | [string, number])
   }
-  const input = directory ? [directory, limit] satisfies [string, number] : [limit] satisfies [number]
+  const params: (string | number)[] = directory ? [directory, limit] : [limit]
+  if (offset) params.push(offset)
   return db
-    .query<Row, [string, number] | [number]>(`
+    .query<Row, (string | number)[]>(`
       SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
              json_extract(m.data, '$.role') AS role,
              p.time_created,
@@ -401,9 +404,9 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
         AND json_extract(m.data, '$.role') IN ('user', 'assistant')
         ${directory ? "AND s.directory = ?" : ""}
       ORDER BY p.time_created DESC
-      LIMIT ?
+      LIMIT ? ${offsetClause}
     `)
-    .all(...input)
+    .all(...params as [string, number] | [number])
 }
 
 function tableExists(db: Database, name: string) {
