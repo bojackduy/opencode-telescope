@@ -153,14 +153,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       return
     }
     const db = dbPath()
-    const timer = setTimeout(() => {
-      try {
-        setPreviewParts(loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db }))
-      } catch {
-        // keep existing parts on error
-      }
-    }, 200)
-    onCleanup(() => clearTimeout(timer))
+    try {
+      setPreviewParts(loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db }))
+    } catch {}
   })
 
   createEffect(() => {
