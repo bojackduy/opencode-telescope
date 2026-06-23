@@ -99,9 +99,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   })
 
   const move = (delta: number) => {
-    if (results().length === 0) return
-    debug.time("nav:total")
-    setSelected((index) => (index + delta + results().length) % results().length)
+    const total = results().length
+    if (total === 0) return
+    setSelected((index) => {
+      const next = (index + delta + total) % total
+      if (next !== index) debug.time("nav:total")
+      return next
+    })
   }
 
   createEffect(() => {
