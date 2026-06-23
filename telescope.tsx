@@ -100,12 +100,14 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   const move = (delta: number) => {
     if (results().length === 0) return
-    debug.time("nav:total")
     setSelected((index) => {
       const next = index + delta
-      if (next < 0) return results().length - 1
-      if (next >= results().length) return results().length - 1
-      return next
+      let finalIndex = next
+      if (next < 0) finalIndex = results().length - 1
+      else if (next >= results().length) finalIndex = results().length - 1
+      
+      if (finalIndex !== index) debug.time("nav:total")
+      return finalIndex
     })
   }
 
