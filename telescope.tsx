@@ -99,12 +99,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   })
 
   const move = (delta: number) => {
-    const total = results().length
-    if (total === 0) return
+    if (results().length === 0) return
     setSelected((index) => {
-      const next = (index + delta + total) % total
-      if (next !== index) debug.time("nav:total")
-      return next
+      const next = index + delta
+      let finalIndex = next
+      if (next < 0) finalIndex = results().length - 1
+      else if (next >= results().length) finalIndex = results().length - 1
+      
+      if (finalIndex !== index) debug.time("nav:total")
+      return finalIndex
     })
   }
 
@@ -148,7 +151,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         setLoadingMore(false)
       }
     }, 100)
-    onCleanup(() => clearTimeout(timer))
+    onCleanup(() => { clearTimeout(timer); setLoadingMore(false) })
   })
 
   let lastPreviewItemId = ""
@@ -192,10 +195,13 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     onCleanup(() => clearInterval(interval))
   })
 
+  let scrolledItem = ""
   createEffect(() => {
     const item = selectedResult()
     previewParts()
     if (!item) return
+    if (item.id === scrolledItem) return
+    scrolledItem = item.id
     const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
     onCleanup(() => clearTimeout(timer))
   })
