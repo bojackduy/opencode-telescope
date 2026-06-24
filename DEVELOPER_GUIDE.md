@@ -27,20 +27,41 @@
 
 ---
 
-### 2. Pagination: cursor resets instead of continuing
+### 2. Pagination and preview scrolling: cursor resets instead of continuing
 
-**Problem:** When loading a new page of results (either in the result list or preview), the cursor/offset jumps back to 0 instead of continuing from where it was. This makes it impossible to browse through pages sanely — the user loses their place.
+**Problem:** When loading a new page of results (either in the result list or preview), the cursor/offset should continue from the current position. The old bug reset the cursor back to the beginning. That is only partially fixed: it no longer resets to the beginning, but preview scrolling can still reset back to the previous/last position, which traps the user and prevents viewing content near the boundary.
+
+**Current broken preview behavior:**
+- User is viewing preview around line/message 5
+- Next scroll should move forward to line/message 8
+- The loaded content only reaches line/message 7
+- Instead of letting the user see line/message 6 and 7, the preview resets back to line/message 5
+- Result: the user cannot view the tail content and gets stuck at the old position
+
+This is still a UX bug. Pagination should never jump backward or trap the user at the previous cursor.
 
 **Root causes:**
 - **Result list** (`telescope.tsx:53-99`): The `createEffect` on query change always calls `searchSessionMessages` / `recentSessionMessages` with `offset: 0`. The "load more" effect (line 121-148) correctly uses `offset: total`, but only fires when near the bottom. The initial load always resets.
 - **Preview** (`telescope.tsx:151-171`): When `selectedResult()` changes, `previewRange` resets to `{ before: 3, after: 6 }`. If the user scrolls down the result list then scrolls up, the preview fetches from scratch.
+- **Preview range model**: The preview is modeled as a bounded `before` / `after` window around the match. This makes it easy to lose scroll continuity when the user reaches the edge of the loaded range.
 - **No scroll restoration**: No saved scroll position or cursor state between navigation.
+
+**Expected preview UX:**
+- The selector should find and anchor the matched message
+- The preview should open around that match and highlight it
+- From there, the user should be able to scroll upward and downward through the whole conversation
+- Loading more content should be seamless, similar to viewing the conversation in OpenCode
+- The match should remain locatable, but the preview should not be limited to a tiny fixed window around the match
 
 **What to do:**
 - Preserve offset between pagination steps instead of resetting
 - Add scroll position memory for result list
 - For preview: keep the existing preview loaded while the new one loads (reduce visual blink)
 - Consider cursor-based pagination (using `time_created` + `id`) instead of offset-based for stable results
+- Revisit whether `previewRange: { before, after }` is the right abstraction
+- Consider a conversation-preview model with a stable anchor message and independent upward/downward cursors
+- Allow preview pagination to append/prepend loaded parts without resetting scroll position
+- Investigate why preview can enter a state where more content cannot be rendered
 
 **Relevant files:**
 - `telescope.tsx:53-99` — initial query effect (resets offset to 0)
@@ -93,3 +114,73 @@
 **Relevant files:**
 - `ui/render-target.ts` — `jumpToRenderedTarget`, `findRenderableTarget`, polling logic
 - `telescope.tsx:199-206` — `open()` function that navigates then jumps
+
+---
+
+### 5. Configurable keybindings
+
+**Goal:** Let users customize Telescope keybindings without editing source code.
+
+**Problem:** Keybindings are currently hardcoded in two places:
+- **Global open shortcut** (`tui.tsx:33`): The plugin always registers `<leader>f` as the open shortcut.
+- **Telescope dialog shortcuts** (`telescope.tsx:222-267` and `telescope.tsx:295-306`): Navigation, preview scrolling, open, close, and mode-switching keys are fixed in code.
+
+This makes the plugin less flexible for users who prefer different navigation styles or who already use the default keys for something else.
+
+**Preferred config location:** Use a plugin-owned config file instead of putting all plugin settings in `opencode.json` / `tui.json`.
+
+Recommended path:
+
+```txt
+~/.config/opencode/opencode-telescope/config.json
+```
+
+This follows the same pattern as plugins like `opencode-quota`, which keeps plugin-specific settings in its own folder:
+
+```txt
+~/.config/opencode/opencode-quota/quota-toast.json
+```
+
+`opencode.json` / `tui.json` should stay focused on core opencode config and plugin registration. The plugin itself should read its own config file.
+
+**Example config:**
+
+```jsonc
+{
+  "openKey": "<leader>f",
+  "keys": {
+    "moveDown": ["down", "j"],
+    "moveUp": ["up", "k"],
+    "scrollPreviewDown": ["d"],
+    "scrollPreviewUp": ["u"],
+    "open": ["enter", "return"],
+    "close": ["q", "escape"],
+    "insertMode": ["/"],
+    "normalMode": ["ctrl+q"]
+  }
+}
+```
+
+**What to do:**
+- Add a config loader, likely `ui/config.ts`
+- Resolve config from `$XDG_CONFIG_HOME/opencode/opencode-telescope/config.json`, falling back to `~/.config/opencode/opencode-telescope/config.json`
+- Use defaults when the file does not exist
+- Ignore invalid fields and keep defaults instead of crashing the plugin
+- Pass parsed config from `tui.tsx` into `Telescope`
+- Replace the hardcoded global open binding with `config.openKey`
+- Replace hardcoded dialog key checks with config-driven checks
+- Update footer/help text so displayed keys match the user config
+- Document the config file in `README.md`
+- Add tests for config parsing and key matching
+
+**Key matching requirements:**
+- Continue supporting simple names like `j`, `k`, `down`, `up`, `enter`, `return`, and `escape`
+- Add support for modifier strings like `ctrl+q`
+- Keep the first implementation small; do not build a full keybinding DSL unless needed
+
+**Relevant files:**
+- `tui.tsx` — parse config, register `openKey`, pass config into `Telescope`
+- `telescope.tsx:222-267` — main keyboard handler with hardcoded bindings
+- `telescope.tsx:295-306` — input-mode keyboard handler
+- `ui/keyboard.ts` — add configurable key matching helper
+- `README.md` — document config file and examples
