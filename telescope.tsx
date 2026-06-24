@@ -32,11 +32,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [loading, setLoading] = createSignal(true)
   const [hasMore, setHasMore] = createSignal(true)
   const [loadingMore, setLoadingMore] = createSignal(false)
+  const [prefetchingResults, setPrefetchingResults] = createSignal(false)
+  const [resultPageInfo, setResultPageInfo] = createSignal({ loadedUntil: 0, hasMore: true, pageSize: 0, lastOffset: 0, lastAdded: 0 })
   const [hasMorePreviewBefore, setHasMorePreviewBefore] = createSignal(false)
   const [hasMorePreviewAfter, setHasMorePreviewAfter] = createSignal(false)
   const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
   const MIN_SEARCH_BATCH_SIZE = 25
   const MIN_RECENT_BATCH_SIZE = 15
+  const RESULT_OVERSCAN_MULTIPLIER = 2
+  const RESULT_PREFETCH_VIEWPORTS = 3
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
   const PREVIEW_PAGE_SIZE = 20
@@ -54,6 +58,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const dbPath = createMemo(() => resolveDatabasePath())
   const directory = props.api.state.path.directory
   let advanceSelectionAfterLoad = false
+  let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
+  onCleanup(() => {
+    if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
+  })
 
   const resultRowHeight = createMemo(() => leftWidth() >= 48 ? 3 : 4)
   const visibleResultRows = () => {
@@ -62,6 +70,34 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   }
   const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * 2)
   const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * 2)
+  const resultPrefetchThreshold = () => Math.max(visibleResultRows() * RESULT_PREFETCH_VIEWPORTS, searchBatchSize())
+  const resultRenderWindow = createMemo(() => {
+    const total = results().length
+    const visible = visibleResultRows()
+    const overscan = visible * RESULT_OVERSCAN_MULTIPLIER
+    const index = selected()
+    const start = Math.max(0, index - overscan)
+    const end = Math.min(total, index + visible + overscan)
+    return { start, end, items: results().slice(start, end) }
+  })
+
+  let lastResultRenderWindow = ""
+  createEffect(() => {
+    const window = resultRenderWindow()
+    const key = `${window.start}:${window.end}:${results().length}`
+    if (key === lastResultRenderWindow) return
+    lastResultRenderWindow = key
+    debug.log("results:render-window", {
+      selected: selected(),
+      totalLoaded: results().length,
+      start: window.start,
+      end: window.end,
+      rendered: window.items.length,
+      visibleRows: visibleResultRows(),
+      overscanRows: visibleResultRows() * RESULT_OVERSCAN_MULTIPLIER,
+      pageInfo: resultPageInfo(),
+    })
+  })
 
   createEffect(() => {
     const q = query().trim()
@@ -79,9 +115,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
           const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir })
           setResults(batch)
           setHasMore(batch.length >= limit)
+          setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
           setSelected(0)
         } catch (err) {
           setResults([])
+          setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
           setError(err instanceof Error ? err.message : String(err))
         }
         debug.timeEnd("query:recent")
@@ -100,9 +138,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir })
         setResults(batch)
         setHasMore(batch.length >= limit)
+        setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
         setSelected(0)
       } catch (err) {
         setResults([])
+        setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
         setError(err instanceof Error ? err.message : String(err))
       } finally {
         debug.timeEnd("query:search")
@@ -115,7 +155,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   const loadMoreResults = (advance = false) => {
     if (advance) advanceSelectionAfterLoad = true
-    if (!hasMore() || loadingMore() || busy() || loading()) return
+    if (!hasMore()) {
+      advanceSelectionAfterLoad = false
+      return
+    }
+    if (loadingMore() || prefetchingResults() || busy() || loading()) return
 
     const total = results().length
     const q = query().trim()
@@ -123,14 +167,18 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const dir = directory
     const limit = q ? searchBatchSize() : recentBatchSize()
 
-    setLoadingMore(true)
+    advance ? setLoadingMore(true) : setPrefetchingResults(true)
     debug.time("query:load-more")
     try {
       const batch = q
         ? searchSessionMessages(q, { limit, offset: total, dbPath: db, directory: dir })
         : recentSessionMessages({ limit, offset: total, dbPath: db, directory: dir })
+      const nextHasMore = batch.length >= limit
+      const nextLoadedUntil = total + batch.length
+      debug.log("results:prefetch", { offset: total, limit, added: batch.length, totalLoaded: nextLoadedUntil, hasMore: nextHasMore, advance })
       setResults((prev) => [...prev, ...batch])
-      if (batch.length < limit) setHasMore(false)
+      setResultPageInfo({ loadedUntil: nextLoadedUntil, hasMore: nextHasMore, pageSize: limit, lastOffset: total, lastAdded: batch.length })
+      if (!nextHasMore) setHasMore(false)
       if (advanceSelectionAfterLoad) {
         debug.log("results:advance-after-load", { from: selected(), total, added: batch.length })
         advanceSelectionAfterLoad = false
@@ -138,10 +186,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       }
     } catch (err) {
       debug.log("results:load-more:error", err instanceof Error ? err.message : String(err))
+      advanceSelectionAfterLoad = false
     } finally {
       debug.timeEnd("query:load-more")
-      setLoadingMore(false)
+      advance ? setLoadingMore(false) : setPrefetchingResults(false)
     }
+  }
+
+  const scheduleResultPrefetch = (advance = false) => {
+    if (advance) advanceSelectionAfterLoad = true
+    if (resultPrefetchTimer || loadingMore() || prefetchingResults()) return
+    debug.log("results:prefetch-scheduled", { advance, pendingAdvance: advanceSelectionAfterLoad, pageInfo: resultPageInfo() })
+    resultPrefetchTimer = setTimeout(() => {
+      resultPrefetchTimer = undefined
+      loadMoreResults(advanceSelectionAfterLoad)
+    }, 1)
   }
 
   const move = (delta: number) => {
@@ -151,7 +210,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       let finalIndex = next
       if (next < 0) finalIndex = results().length - 1
       else if (next >= results().length) {
-        if (hasMore()) loadMoreResults(true)
+        if (hasMore()) scheduleResultPrefetch(true)
         finalIndex = results().length - 1
       }
        
@@ -162,7 +221,8 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   createEffect(() => {
     const index = selected()
-    const row = resultScroll?.getChildren()[index]
+    const window = resultRenderWindow()
+    const row = resultScroll?.getChildren()[index - window.start]
     if (!resultScroll || !row) return
     const y = row.y - resultScroll.y
     if (y < 0) {
@@ -177,11 +237,11 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   createEffect(() => {
     const index = selected()
     const total = results().length
-    const threshold = Math.max(3, visibleResultRows())
+    const threshold = resultPrefetchThreshold()
     if (index < total - threshold) return
-    if (!hasMore() || loadingMore() || busy() || loading()) return
+    if (!hasMore() || loadingMore() || prefetchingResults() || busy() || loading()) return
 
-    const timer = setTimeout(() => loadMoreResults(false), 100)
+    const timer = setTimeout(() => scheduleResultPrefetch(false), 100)
     onCleanup(() => clearTimeout(timer))
   })
 
@@ -454,18 +514,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   >
                     <Show when={!loading()}>
                       <Show when={results().length > 0} fallback={<EmptyState query={query()} theme={theme()} />}>
-                        <For each={results()}>
-                          {(item, index) => (
-                            <ResultRow
-                              item={item}
-                              active={index() === selected()}
-                              width={leftWidth()}
-                              query={query()}
-                              theme={theme()}
-                              onMouseOver={() => setSelected(index())}
-                              onOpen={open}
-                            />
-                          )}
+                        <For each={resultRenderWindow().items}>
+                          {(item, index) => {
+                            const absoluteIndex = () => resultRenderWindow().start + index()
+                            return (
+                              <ResultRow
+                                item={item}
+                                active={absoluteIndex() === selected()}
+                                width={leftWidth()}
+                                query={query()}
+                                theme={theme()}
+                                onMouseOver={() => setSelected(absoluteIndex())}
+                                onOpen={open}
+                              />
+                            )
+                          }}
                         </For>
                         <Show when={loadingMore()}>
                           <SkeletonRow theme={theme()} />
