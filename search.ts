@@ -69,6 +69,19 @@ type ConversationRow = {
 }
 
 let cachedDbPath: string | undefined
+let _db: Database | undefined
+let _dbPath: string | undefined
+
+function getDb(dbPath?: string): Database {
+  const resolved = dbPath ?? resolveDatabasePath()
+  if (!_db || resolved !== _dbPath) {
+    _db?.close()
+    _db = new Database(resolved, { readonly: true })
+    _dbPath = resolved
+    tableCache.clear()
+  }
+  return _db
+}
 
 export function resolveDatabasePath() {
   if (cachedDbPath) return cachedDbPath
@@ -105,90 +118,78 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
   const term = query.trim()
   if (!term) return []
   if (options?.dbPath === ":memory:") return []
-  const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
-  try {
-    return searchRows(db, term, options?.limit ?? 80, options?.directory, options?.offset)
-  } finally {
-    db.close()
-  }
+  const db = getDb(options?.dbPath)
+  return searchRows(db, term, options?.limit ?? 80, options?.directory, options?.offset)
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string }) {
-  const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
-  try {
-    return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset).flatMap(
-      (row) => rowToSearchResult(row, "") ?? [],
-    )
-  } finally {
-    db.close()
-  }
+  const db = getDb(options?.dbPath)
+  return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset).flatMap(
+    (row) => rowToSearchResult(row, "") ?? [],
+  )
 }
 
 export function loadConversationWindow(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }) {
   debug.time("preview:query:total")
-  const db = new Database(options?.dbPath ?? resolveDatabasePath(), { readonly: true })
-  try {
-    const before = options?.before ?? 3
-    const after = options?.after ?? 6
+  const db = getDb(options?.dbPath)
+  const before = options?.before ?? 3
+  const after = options?.after ?? 6
 
-    debug.time("preview:query:hit")
-    const hit = db.query<{ time_created: number }, [string]>(
-      "SELECT time_created FROM part WHERE id = ?",
-    ).get(result.id)
-    debug.timeEnd("preview:query:hit")
-    if (!hit) {
-      debug.timeEnd("preview:query:total")
-      return []
-    }
-
-    const fetchBefore = Math.max(before * 4, 30)
-    const fetchAfter = Math.max(after * 4, 50)
-
-    debug.time("preview:query:before")
-    const beforeRows = db.query<ConversationRow, [string, number, number, string, number]>(`
-      SELECT p.id, p.message_id, p.session_id,
-             json_extract(m.data, '$.role') AS role,
-             json_extract(p.data, '$.type') AS type,
-             p.time_created, p.data
-      FROM part p
-      JOIN message m ON m.id = p.message_id
-      WHERE p.session_id = ?
-        AND (p.time_created < ? OR (p.time_created = ? AND p.id < ?))
-      ORDER BY p.time_created DESC, p.id DESC
-      LIMIT ?
-    `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchBefore)
-    debug.timeEnd("preview:query:before")
-
-    debug.time("preview:query:after")
-    const afterRows = db.query<ConversationRow, [string, number, number, string, number]>(`
-      SELECT p.id, p.message_id, p.session_id,
-             json_extract(m.data, '$.role') AS role,
-             json_extract(p.data, '$.type') AS type,
-             p.time_created, p.data
-      FROM part p
-      JOIN message m ON m.id = p.message_id
-      WHERE p.session_id = ?
-        AND (p.time_created > ? OR (p.time_created = ? AND p.id >= ?))
-      ORDER BY p.time_created ASC, p.id ASC
-      LIMIT ?
-    `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchAfter)
-    debug.timeEnd("preview:query:after")
-
-    debug.time("preview:query:parse")
-    const isValid = (row: ConversationRow) =>
-      (row.role === "user" || row.role === "assistant") &&
-      (row.type === "text" || row.type === "reasoning" || row.type === "tool")
-
-    const parts = [
-      ...beforeRows.filter(isValid).slice(0, before).reverse(),
-      ...afterRows.filter(isValid).slice(0, after + 1),
-    ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
-    debug.timeEnd("preview:query:parse")
+  debug.time("preview:query:hit")
+  const hit = db.query<{ time_created: number }, [string]>(
+    "SELECT time_created FROM part WHERE id = ?",
+  ).get(result.id)
+  debug.timeEnd("preview:query:hit")
+  if (!hit) {
     debug.timeEnd("preview:query:total")
-    return parts
-  } finally {
-    db.close()
+    return []
   }
+
+  const fetchBefore = Math.max(before * 4, 30)
+  const fetchAfter = Math.max(after * 4, 50)
+
+  debug.time("preview:query:before")
+  const beforeRows = db.query<ConversationRow, [string, number, number, string, number]>(`
+    SELECT p.id, p.message_id, p.session_id,
+           json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS type,
+           p.time_created, p.data
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    WHERE p.session_id = ?
+      AND (p.time_created < ? OR (p.time_created = ? AND p.id < ?))
+    ORDER BY p.time_created DESC, p.id DESC
+    LIMIT ?
+  `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchBefore)
+  debug.timeEnd("preview:query:before")
+
+  debug.time("preview:query:after")
+  const afterRows = db.query<ConversationRow, [string, number, number, string, number]>(`
+    SELECT p.id, p.message_id, p.session_id,
+           json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS type,
+           p.time_created, p.data
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    WHERE p.session_id = ?
+      AND (p.time_created > ? OR (p.time_created = ? AND p.id >= ?))
+    ORDER BY p.time_created ASC, p.id ASC
+    LIMIT ?
+  `).all(result.sessionID, hit.time_created, hit.time_created, result.id, fetchAfter)
+  debug.timeEnd("preview:query:after")
+
+  debug.time("preview:query:parse")
+  const isValid = (row: ConversationRow) =>
+    (row.role === "user" || row.role === "assistant") &&
+    (row.type === "text" || row.type === "reasoning" || row.type === "tool")
+
+  const parts = [
+    ...beforeRows.filter(isValid).slice(0, before).reverse(),
+    ...afterRows.filter(isValid).slice(0, after + 1),
+  ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+  debug.timeEnd("preview:query:parse")
+  debug.timeEnd("preview:query:total")
+  return parts
 }
 
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
@@ -419,7 +420,13 @@ function parseToolState(value: unknown): ToolState | undefined {
 
 function searchRows(db: Database, query: string, limit: number, directory?: string, offset?: number) {
   if (!tableExists(db, "part") || !tableExists(db, "message")) return []
-  return visibleTextRows(db, limit, query, directory, offset).flatMap((row) => rowToSearchResult(row, query) ?? [])
+  debug.time("query:sql")
+  const rows = visibleTextRows(db, limit, query, directory, offset)
+  debug.timeEnd("query:sql")
+  debug.time("query:map")
+  const results = rows.flatMap((row) => rowToSearchResult(row, query) ?? [])
+  debug.timeEnd("query:map")
+  return results
 }
 
 function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number) {
@@ -444,24 +451,30 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
   params.push(limit)
   if (offset) params.push(offset)
 
-  return db
-    .query<Row, (string | number)[]>(`
-      SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
-             json_extract(m.data, '$.role') AS role,
-             p.time_created,
-             json_extract(p.data, '$.text') AS text
-      FROM part p
-      JOIN message m ON m.id = p.message_id
-      JOIN session s ON s.id = p.session_id
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY p.time_created DESC
-      LIMIT ? ${offsetClause}
-    `)
-    .all(...params as any[])
+  const sql = `
+    SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
+           json_extract(m.data, '$.role') AS role,
+           p.time_created,
+           json_extract(p.data, '$.text') AS text
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    JOIN session s ON s.id = p.session_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY p.time_created DESC
+    LIMIT ? ${offsetClause}
+  `
+  debug.time("query:sql:exec")
+  const rows = db.query<Row, (string | number)[]>(sql).all(...params as any[])
+  debug.timeEnd("query:sql:exec")
+  return rows
 }
 
+const tableCache = new Map<string, boolean>()
 function tableExists(db: Database, name: string) {
-  return Boolean(db.query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))
+  if (tableCache.has(name)) return tableCache.get(name)!
+  const exists = Boolean(db.query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))
+  tableCache.set(name, exists)
+  return exists
 }
 
 function defaultDataDir() {
