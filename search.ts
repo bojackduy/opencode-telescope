@@ -144,6 +144,13 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
   ).get(result.id)
   debug.timeEnd("preview:query:hit")
   if (!hit) {
+    debug.log("preview:window", {
+      item: result.id,
+      session: result.sessionID,
+      before,
+      after,
+      hit: false,
+    })
     debug.timeEnd("preview:query:total")
     return []
   }
@@ -190,6 +197,19 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
     ...beforeRows.filter(isValid).slice(0, before).reverse(),
     ...afterRows.filter(isValid).slice(0, after + 1),
   ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+  debug.log("preview:window", {
+    item: result.id,
+    session: result.sessionID,
+    before,
+    after,
+    fetchBefore,
+    fetchAfter,
+    beforeRows: beforeRows.length,
+    afterRows: afterRows.length,
+    parts: parts.length,
+    first: parts[0]?.id,
+    last: parts.at(-1)?.id,
+  })
   debug.timeEnd("preview:query:parse")
   debug.timeEnd("preview:query:total")
   return parts

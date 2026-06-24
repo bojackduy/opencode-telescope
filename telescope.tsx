@@ -171,7 +171,16 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const db = dbPath()
     debug.time("preview:load")
     try {
-      setPreviewParts(loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db }))
+      const parts = loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db })
+      debug.log("preview:loaded", {
+        item: item.id,
+        session: item.sessionID,
+        range,
+        parts: parts.length,
+        first: parts[0]?.id,
+        last: parts.at(-1)?.id,
+      })
+      setPreviewParts(parts)
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
@@ -189,6 +198,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       const totalContentHeight = lastChild.y + lastChild.height
       const atTop = scroll.y <= 0 && range.before > 0
       const atBottom = scroll.y + scroll.height >= totalContentHeight - 1
+      debug.log("preview:scroll", {
+        y: scroll.y,
+        height: scroll.height,
+        contentHeight: totalContentHeight,
+        atTop,
+        atBottom,
+        range,
+        children: children.length,
+      })
       if (atTop) setPreviewRange((prev) => ({ ...prev, before: prev.before + PREVIEW_EXPAND_STEP }))
       if (atBottom) setPreviewRange((prev) => ({ ...prev, after: prev.after + PREVIEW_EXPAND_STEP }))
     }, 400)
