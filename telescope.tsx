@@ -6,7 +6,9 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "so
 import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
 import { EmptyState, ResultRow, SkeletonRow } from "./components/result-list.tsx"
 import {
-  loadConversationWindow,
+  loadConversationAfter,
+  loadConversationAround,
+  loadConversationBefore,
   recentSessionMessages,
   resolveDatabasePath,
   searchSessionMessages,
@@ -30,12 +32,14 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [loading, setLoading] = createSignal(true)
   const [hasMore, setHasMore] = createSignal(true)
   const [loadingMore, setLoadingMore] = createSignal(false)
+  const [hasMorePreviewBefore, setHasMorePreviewBefore] = createSignal(false)
+  const [hasMorePreviewAfter, setHasMorePreviewAfter] = createSignal(false)
+  const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
   const BATCH_SIZE = 25
   const RECENT_BATCH_SIZE = 15
-  const INITIAL_PREVIEW_BEFORE = 3
-  const INITIAL_PREVIEW_AFTER = 6
-  const PREVIEW_EXPAND_STEP = 5
-  const [previewRange, setPreviewRange] = createSignal({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
+  const INITIAL_PREVIEW_BEFORE = 20
+  const INITIAL_PREVIEW_AFTER = 30
+  const PREVIEW_PAGE_SIZE = 20
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -154,33 +158,96 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     onCleanup(() => { clearTimeout(timer); setLoadingMore(false) })
   })
 
+  const previewContentHeight = () => {
+    const children = previewScroll?.getChildren()
+    const lastChild = children?.[children.length - 1] as { y: number; height: number } | undefined
+    return lastChild ? lastChild.y + lastChild.height : 0
+  }
+
+  const loadPreviewBefore = (previousContentHeight = previewContentHeight()) => {
+    const item = selectedResult()
+    const first = previewParts()[0]
+    if (!item || !first || loadingPreviewMore()) return
+    setLoadingPreviewMore(true)
+    debug.time("preview:load-before")
+    try {
+      const page = loadConversationBefore(item, { id: first.id, timeCreated: first.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      debug.log("preview:load-before", {
+        item: item.id,
+        added: page.parts.length,
+        hasMoreBefore: page.hasMoreBefore,
+        first: page.parts[0]?.id,
+        last: page.parts.at(-1)?.id,
+      })
+      if (page.parts.length > 0) {
+        setPreviewParts((prev) => [...page.parts, ...prev])
+        setTimeout(() => {
+          const delta = previewContentHeight() - previousContentHeight
+          if (delta > 0) previewScroll?.scrollBy(delta)
+        }, 1)
+      }
+      setHasMorePreviewBefore(page.hasMoreBefore)
+    } catch (err) {
+      debug.log("preview:load-before:error", err instanceof Error ? err.message : String(err))
+    } finally {
+      debug.timeEnd("preview:load-before")
+      setLoadingPreviewMore(false)
+    }
+  }
+
+  const loadPreviewAfter = () => {
+    const item = selectedResult()
+    const last = previewParts().at(-1)
+    if (!item || !last || loadingPreviewMore()) return
+    setLoadingPreviewMore(true)
+    debug.time("preview:load-after")
+    try {
+      const page = loadConversationAfter(item, { id: last.id, timeCreated: last.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      debug.log("preview:load-after", {
+        item: item.id,
+        added: page.parts.length,
+        hasMoreAfter: page.hasMoreAfter,
+        first: page.parts[0]?.id,
+        last: page.parts.at(-1)?.id,
+      })
+      if (page.parts.length > 0) setPreviewParts((prev) => [...prev, ...page.parts])
+      setHasMorePreviewAfter(page.hasMoreAfter)
+    } catch (err) {
+      debug.log("preview:load-after:error", err instanceof Error ? err.message : String(err))
+    } finally {
+      debug.timeEnd("preview:load-after")
+      setLoadingPreviewMore(false)
+    }
+  }
+
   let lastPreviewItemId = ""
   createEffect(() => {
     const item = selectedResult()
-    const range = previewRange()
     if (!item) {
       setPreviewParts([])
+      setHasMorePreviewBefore(false)
+      setHasMorePreviewAfter(false)
       return
     }
-    if (item.id !== lastPreviewItemId) {
-      lastPreviewItemId = item.id
-      debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
-      setPreviewRange({ before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER })
-      return
-    }
+    if (item.id === lastPreviewItemId) return
+    lastPreviewItemId = item.id
+    debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
     debug.time("preview:load")
     try {
-      const parts = loadConversationWindow(item, { before: range.before, after: range.after, dbPath: db })
-      debug.log("preview:loaded", {
+      const page = loadConversationAround(item, { before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER, dbPath: db })
+      debug.log("preview:init", {
         item: item.id,
         session: item.sessionID,
-        range,
-        parts: parts.length,
-        first: parts[0]?.id,
-        last: parts.at(-1)?.id,
+        parts: page.parts.length,
+        hasMoreBefore: page.hasMoreBefore,
+        hasMoreAfter: page.hasMoreAfter,
+        first: page.parts[0]?.id,
+        last: page.parts.at(-1)?.id,
       })
-      setPreviewParts(parts)
+      setPreviewParts(page.parts)
+      setHasMorePreviewBefore(page.hasMoreBefore)
+      setHasMorePreviewAfter(page.hasMoreAfter)
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
@@ -190,25 +257,28 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const item = selectedResult()
     if (!item) return
     const interval = setInterval(() => {
+      if (loadingPreviewMore()) return
       const scroll = previewScroll
       const children = scroll?.getChildren()
       if (!scroll || !children || children.length === 0) return
-      const range = previewRange()
       const lastChild = children[children.length - 1] as { y: number; height: number }
       const totalContentHeight = lastChild.y + lastChild.height
-      const atTop = scroll.y <= 0 && range.before > 0
+      const atTop = scroll.y <= 0
       const atBottom = scroll.y + scroll.height >= totalContentHeight - 1
-      debug.log("preview:scroll", {
-        y: scroll.y,
-        height: scroll.height,
-        contentHeight: totalContentHeight,
-        atTop,
-        atBottom,
-        range,
-        children: children.length,
-      })
-      if (atTop) setPreviewRange((prev) => ({ ...prev, before: prev.before + PREVIEW_EXPAND_STEP }))
-      if (atBottom) setPreviewRange((prev) => ({ ...prev, after: prev.after + PREVIEW_EXPAND_STEP }))
+      if (atTop || atBottom) {
+        debug.log("preview:scroll-edge", {
+          y: scroll.y,
+          height: scroll.height,
+          contentHeight: totalContentHeight,
+          atTop,
+          atBottom,
+          hasMoreBefore: hasMorePreviewBefore(),
+          hasMoreAfter: hasMorePreviewAfter(),
+          children: children.length,
+        })
+      }
+      if (atTop && hasMorePreviewBefore()) loadPreviewBefore(totalContentHeight)
+      if (atBottom && hasMorePreviewAfter()) loadPreviewAfter()
     }, 400)
     onCleanup(() => clearInterval(interval))
   })

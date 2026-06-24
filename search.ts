@@ -40,6 +40,17 @@ export type ConversationPreviewPart = {
   target: boolean
 }
 
+export type ConversationPreviewPage = {
+  parts: ConversationPreviewPart[]
+  hasMoreBefore: boolean
+  hasMoreAfter: boolean
+}
+
+export type ConversationPreviewCursor = {
+  id: string
+  timeCreated: number
+}
+
 export type ToolState = {
   status: "pending" | "running" | "completed" | "error"
   input?: unknown
@@ -132,7 +143,7 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
   )
 }
 
-export function loadConversationWindow(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }) {
+export function loadConversationAround(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }): ConversationPreviewPage {
   debug.time("preview:query:total")
   const db = getDb(options?.dbPath)
   const before = options?.before ?? 3
@@ -152,11 +163,11 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
       hit: false,
     })
     debug.timeEnd("preview:query:total")
-    return []
+    return { parts: [], hasMoreBefore: false, hasMoreAfter: false }
   }
 
-  const fetchBefore = Math.max(before * 4, 30)
-  const fetchAfter = Math.max(after * 4, 50)
+  const fetchBefore = Math.max(before * 4, before + 1, 30)
+  const fetchAfter = Math.max((after + 1) * 4, after + 2, 50)
 
   debug.time("preview:query:before")
   const beforeRows = db.query<ConversationRow, [string, number, number, string, number]>(`
@@ -189,17 +200,21 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
   debug.timeEnd("preview:query:after")
 
   debug.time("preview:query:parse")
-  const isValid = (row: ConversationRow) =>
-    (row.role === "user" || row.role === "assistant") &&
-    (row.type === "text" || row.type === "reasoning" || row.type === "tool")
-
+  const validBefore = beforeRows.filter(isPreviewRow)
+  const validAfter = afterRows.filter(isPreviewRow)
   const parts = [
-    ...beforeRows.filter(isValid).slice(0, before).reverse(),
-    ...afterRows.filter(isValid).slice(0, after + 1),
+    ...validBefore.slice(0, before).reverse(),
+    ...validAfter.slice(0, after + 1),
   ].flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+  const page = {
+    parts,
+    hasMoreBefore: validBefore.length > before,
+    hasMoreAfter: validAfter.length > after + 1,
+  }
   debug.log("preview:window", {
     item: result.id,
     session: result.sessionID,
+    mode: "around",
     before,
     after,
     fetchBefore,
@@ -207,12 +222,86 @@ export function loadConversationWindow(result: SearchResult, options?: { before?
     beforeRows: beforeRows.length,
     afterRows: afterRows.length,
     parts: parts.length,
+    hasMoreBefore: page.hasMoreBefore,
+    hasMoreAfter: page.hasMoreAfter,
     first: parts[0]?.id,
     last: parts.at(-1)?.id,
   })
   debug.timeEnd("preview:query:parse")
   debug.timeEnd("preview:query:total")
-  return parts
+  return page
+}
+
+export function loadConversationBefore(result: SearchResult, cursor: ConversationPreviewCursor, options?: { limit?: number; dbPath?: string }) {
+  debug.time("preview:query:before-page")
+  const db = getDb(options?.dbPath)
+  const limit = options?.limit ?? 20
+  const fetchLimit = Math.max(limit * 4, limit + 1, 30)
+  const rows = db.query<ConversationRow, [string, number, number, string, number]>(`
+    SELECT p.id, p.message_id, p.session_id,
+           json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS type,
+           p.time_created, p.data
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    WHERE p.session_id = ?
+      AND (p.time_created < ? OR (p.time_created = ? AND p.id < ?))
+    ORDER BY p.time_created DESC, p.id DESC
+    LIMIT ?
+  `).all(result.sessionID, cursor.timeCreated, cursor.timeCreated, cursor.id, fetchLimit)
+  const valid = rows.filter(isPreviewRow)
+  const parts = valid.slice(0, limit).reverse().flatMap((row) => parseConversationPart(row, false) ?? [])
+  const page = { parts, hasMoreBefore: valid.length > limit }
+  debug.log("preview:window", {
+    item: result.id,
+    session: result.sessionID,
+    mode: "before",
+    cursor,
+    limit,
+    rows: rows.length,
+    parts: parts.length,
+    hasMoreBefore: page.hasMoreBefore,
+    first: parts[0]?.id,
+    last: parts.at(-1)?.id,
+  })
+  debug.timeEnd("preview:query:before-page")
+  return page
+}
+
+export function loadConversationAfter(result: SearchResult, cursor: ConversationPreviewCursor, options?: { limit?: number; dbPath?: string }) {
+  debug.time("preview:query:after-page")
+  const db = getDb(options?.dbPath)
+  const limit = options?.limit ?? 20
+  const fetchLimit = Math.max(limit * 4, limit + 1, 30)
+  const rows = db.query<ConversationRow, [string, number, number, string, number]>(`
+    SELECT p.id, p.message_id, p.session_id,
+           json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS type,
+           p.time_created, p.data
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    WHERE p.session_id = ?
+      AND (p.time_created > ? OR (p.time_created = ? AND p.id > ?))
+    ORDER BY p.time_created ASC, p.id ASC
+    LIMIT ?
+  `).all(result.sessionID, cursor.timeCreated, cursor.timeCreated, cursor.id, fetchLimit)
+  const valid = rows.filter(isPreviewRow)
+  const parts = valid.slice(0, limit).flatMap((row) => parseConversationPart(row, false) ?? [])
+  const page = { parts, hasMoreAfter: valid.length > limit }
+  debug.log("preview:window", {
+    item: result.id,
+    session: result.sessionID,
+    mode: "after",
+    cursor,
+    limit,
+    rows: rows.length,
+    parts: parts.length,
+    hasMoreAfter: page.hasMoreAfter,
+    first: parts[0]?.id,
+    last: parts.at(-1)?.id,
+  })
+  debug.timeEnd("preview:query:after-page")
+  return page
 }
 
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
@@ -417,6 +506,11 @@ function parseConversationPart(row: ConversationRow, target: boolean): Conversat
     text,
     target,
   }
+}
+
+function isPreviewRow(row: ConversationRow) {
+  return (row.role === "user" || row.role === "assistant") &&
+    (row.type === "text" || row.type === "reasoning" || row.type === "tool")
 }
 
 function parsePartData(data: string) {

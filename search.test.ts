@@ -3,7 +3,16 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { extractSearchText, makeSnippet, rowToSearchResult, searchSessionMessages } from "./search"
+import {
+  extractSearchText,
+  loadConversationAfter,
+  loadConversationAround,
+  loadConversationBefore,
+  makeSnippet,
+  rowToSearchResult,
+  searchSessionMessages,
+  type SearchResult,
+} from "./search"
 
 describe("session search helpers", () => {
   test("extracts user message text", () => {
@@ -155,4 +164,65 @@ describe("session search helpers", () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test("loads preview pages before and after a matched conversation part", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-preview-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      for (let index = 0; index < 7; index++) {
+        db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+          .run(`prt_${index}`, "msg_1", "ses_1", index, JSON.stringify({ type: "text", text: `message ${index}` }))
+      }
+
+      const result = previewResult("prt_3", "msg_1", "ses_1", dir, 3)
+      const around = loadConversationAround(result, { before: 2, after: 2, dbPath })
+      expect(around.parts.map((part) => part.id)).toEqual(["prt_1", "prt_2", "prt_3", "prt_4", "prt_5"])
+      expect(around.hasMoreBefore).toBe(true)
+      expect(around.hasMoreAfter).toBe(true)
+
+      const before = loadConversationBefore(result, { id: "prt_1", timeCreated: 1 }, { limit: 1, dbPath })
+      expect(before.parts.map((part) => part.id)).toEqual(["prt_0"])
+      expect(before.hasMoreBefore).toBe(false)
+
+      const after = loadConversationAfter(result, { id: "prt_5", timeCreated: 5 }, { limit: 1, dbPath })
+      expect(after.parts.map((part) => part.id)).toEqual(["prt_6"])
+      expect(after.hasMoreAfter).toBe(false)
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
+
+function previewResult(id: string, messageID: string, sessionID: string, directory: string, timeCreated: number): SearchResult {
+  return {
+    id,
+    messageID,
+    sessionID,
+    sessionTitle: "Test",
+    directory,
+    role: "assistant",
+    timeCreated,
+    snippet: "",
+    matchStart: 0,
+    matchEnd: 0,
+    before: "",
+    match: "",
+    after: "",
+    excerpt: "",
+    previewBefore: "",
+    previewMatch: "",
+    previewAfter: "",
+    previewMode: "markdown",
+    previewHighlight: false,
+    text: "",
+  }
+}
