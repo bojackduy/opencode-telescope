@@ -502,7 +502,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
             <box flexDirection="row" flexGrow={1} minHeight={0}>
               <box width={leftWidth()} flexDirection="column" minHeight={0} backgroundColor={theme().backgroundPanel}>
-                <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: false }}>
+                <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: true }}>
                   <Show
                     when={!error()}
                     fallback={
