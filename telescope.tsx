@@ -2,7 +2,7 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { InputRenderable, ParsedKey, ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
+import { For, Show, batch as solidBatch, createEffect, createMemo, createSignal, onCleanup } from "solid-js"
 import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
 import { EmptyState, ResultRow, SkeletonRow } from "./components/result-list.tsx"
 import {
@@ -26,12 +26,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const [results, setResults] = createSignal<SearchResult[]>([])
   const [previewParts, setPreviewParts] = createSignal<ConversationPreviewPart[]>([])
   const [selected, setSelected] = createSignal(0)
+  const [resultBaseOffset, setResultBaseOffset] = createSignal(0)
+  const [nextResultOffset, setNextResultOffset] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
   const [mode, setMode] = createSignal<"normal" | "insert">("normal")
   const [loading, setLoading] = createSignal(true)
   const [hasMore, setHasMore] = createSignal(true)
   const [loadingMore, setLoadingMore] = createSignal(false)
+  const [loadingPreviousResults, setLoadingPreviousResults] = createSignal(false)
   const [prefetchingResults, setPrefetchingResults] = createSignal(false)
   const [resultPageInfo, setResultPageInfo] = createSignal({ loadedUntil: 0, hasMore: true, pageSize: 0, lastOffset: 0, lastAdded: 0 })
   const [hasMorePreviewBefore, setHasMorePreviewBefore] = createSignal(false)
@@ -43,6 +46,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
   const RESULT_PREFETCH_VIEWPORTS = 3
+  const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
   const PREVIEW_PAGE_SIZE = 20
@@ -53,7 +57,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   const theme = createMemo(() => props.api.theme.current)
   const syntax = createMemo(() => syntaxStyle(theme()))
-  const selectedResult = createMemo(() => results()[selected()])
+  const selectedResult = createMemo(() => results()[selected() - resultBaseOffset()])
   const popupWidth = createMemo(() => Math.max(72, Math.min(dimensions().width - 2, Math.floor(dimensions().width * 0.92))))
   const leftWidth = createMemo(() => Math.max(36, Math.min(64, Math.floor(popupWidth() * 0.36))))
   const height = createMemo(() => Math.max(18, dimensions().height - 8))
@@ -61,7 +65,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const dbPath = createMemo(() => resolveDatabasePath())
   const directory = props.api.state.path.directory
   let advanceSelectionAfterLoad = false
+  let advanceSelectionBeforeLoad = false
   let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
+  let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let previewBeforeTimer: ReturnType<typeof setTimeout> | undefined
   let previewAfterTimer: ReturnType<typeof setTimeout> | undefined
   let pendingPreviewBefore: { previousContentHeight: number; preserveScroll: boolean; visibleLoad: boolean } | undefined
@@ -79,6 +85,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   }
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
+    if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
     cancelPreviewPrefetch()
   })
 
@@ -90,24 +97,38 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * 2)
   const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * 2)
   const resultPrefetchThreshold = () => Math.max(visibleResultRows() * RESULT_PREFETCH_VIEWPORTS, searchBatchSize())
+  const trimResultCache = (items: SearchResult[], anchorIndex: number) => {
+    const base = resultBaseOffset()
+    const keepBehind = visibleResultRows() * RESULT_CACHE_BEHIND_VIEWPORTS
+    const minOffset = Math.max(0, anchorIndex - keepBehind)
+    const drop = Math.min(Math.max(0, minOffset - base), Math.max(0, items.length - 1))
+    if (drop === 0) return { base, items }
+
+    const nextBase = base + drop
+    debug.log("results:evict", { fromBase: base, toBase: nextBase, dropped: drop, kept: items.length - drop, anchorIndex })
+    return { base: nextBase, items: items.slice(drop) }
+  }
   const resultRenderWindow = createMemo(() => {
-    const total = results().length
+    const base = resultBaseOffset()
+    const cached = results()
     const visible = visibleResultRows()
     const overscan = visible * RESULT_OVERSCAN_MULTIPLIER
     const index = selected()
-    const start = Math.max(0, index - overscan)
-    const end = Math.min(total, index + visible + overscan)
-    return { start, end, items: results().slice(start, end) }
+    const cachedStart = Math.max(0, index - overscan - base)
+    const cachedEnd = Math.min(cached.length, index + visible + overscan - base)
+    return { start: base + cachedStart, end: base + cachedEnd, items: cached.slice(cachedStart, cachedEnd) }
   })
 
   let lastResultRenderWindow = ""
   createEffect(() => {
     const window = resultRenderWindow()
-    const key = `${window.start}:${window.end}:${results().length}`
+    const key = `${window.start}:${window.end}:${resultBaseOffset()}:${nextResultOffset()}:${results().length}`
     if (key === lastResultRenderWindow) return
     lastResultRenderWindow = key
     debug.log("results:render-window", {
       selected: selected(),
+      baseOffset: resultBaseOffset(),
+      nextOffset: nextResultOffset(),
       totalLoaded: results().length,
       start: window.start,
       end: window.end,
@@ -122,6 +143,15 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     const q = query().trim()
     setError("")
     setHasMore(true)
+    if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
+    if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
+    resultPrefetchTimer = undefined
+    resultPreviousTimer = undefined
+    advanceSelectionAfterLoad = false
+    advanceSelectionBeforeLoad = false
+    setLoadingMore(false)
+    setLoadingPreviousResults(false)
+    setPrefetchingResults(false)
     const db = dbPath()
     const dir = directory
 
@@ -132,13 +162,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
         debug.time("query:recent")
         try {
           const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir })
-          setResults(batch)
-          setHasMore(batch.length >= limit)
-          setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-          setSelected(0)
+          solidBatch(() => {
+            setResults(batch)
+            setResultBaseOffset(0)
+            setNextResultOffset(batch.length)
+            setHasMore(batch.length >= limit)
+            setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
+            setSelected(0)
+          })
         } catch (err) {
-          setResults([])
-          setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
+          solidBatch(() => {
+            setResults([])
+            setResultBaseOffset(0)
+            setNextResultOffset(0)
+            setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
+          })
           setError(err instanceof Error ? err.message : String(err))
         }
         debug.timeEnd("query:recent")
@@ -155,13 +193,21 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       debug.time("query:search")
       try {
         const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir })
-        setResults(batch)
-        setHasMore(batch.length >= limit)
-        setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-        setSelected(0)
+        solidBatch(() => {
+          setResults(batch)
+          setResultBaseOffset(0)
+          setNextResultOffset(batch.length)
+          setHasMore(batch.length >= limit)
+          setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
+          setSelected(0)
+        })
       } catch (err) {
-        setResults([])
-        setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
+        solidBatch(() => {
+          setResults([])
+          setResultBaseOffset(0)
+          setNextResultOffset(0)
+          setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
+        })
         setError(err instanceof Error ? err.message : String(err))
       } finally {
         debug.timeEnd("query:search")
@@ -178,9 +224,9 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
       advanceSelectionAfterLoad = false
       return
     }
-    if (loadingMore() || prefetchingResults() || busy() || loading()) return
+    if (loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
 
-    const total = results().length
+    const offset = nextResultOffset()
     const q = query().trim()
     const db = dbPath()
     const dir = directory
@@ -190,18 +236,35 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     debug.time("query:load-more")
     try {
       const batch = q
-        ? searchSessionMessages(q, { limit, offset: total, dbPath: db, directory: dir })
-        : recentSessionMessages({ limit, offset: total, dbPath: db, directory: dir })
+        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir })
+        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir })
       const nextHasMore = batch.length >= limit
-      const nextLoadedUntil = total + batch.length
-      debug.log("results:prefetch", { offset: total, limit, added: batch.length, totalLoaded: nextLoadedUntil, hasMore: nextHasMore, advance })
-      setResults((prev) => [...prev, ...batch])
-      setResultPageInfo({ loadedUntil: nextLoadedUntil, hasMore: nextHasMore, pageSize: limit, lastOffset: total, lastAdded: batch.length })
-      if (!nextHasMore) setHasMore(false)
-      if (advanceSelectionAfterLoad) {
-        debug.log("results:advance-after-load", { from: selected(), total, added: batch.length })
+      const nextLoadedUntil = offset + batch.length
+      const previousSelected = selected()
+      const nextSelected = advanceSelectionAfterLoad && batch.length > 0 ? offset : selected()
+      const nextCache = trimResultCache([...results(), ...batch], nextSelected)
+      debug.log("results:prefetch", {
+        offset,
+        limit,
+        added: batch.length,
+        baseOffset: nextCache.base,
+        cached: nextCache.items.length,
+        totalLoaded: nextLoadedUntil,
+        hasMore: nextHasMore,
+        advance,
+      })
+      const shouldAdvance = advanceSelectionAfterLoad
+      solidBatch(() => {
+        setResultBaseOffset(nextCache.base)
+        setNextResultOffset(nextLoadedUntil)
+        setResults(nextCache.items)
+        setResultPageInfo({ loadedUntil: nextLoadedUntil, hasMore: nextHasMore, pageSize: limit, lastOffset: offset, lastAdded: batch.length })
+        if (!nextHasMore) setHasMore(false)
+        if (shouldAdvance && batch.length > 0) setSelected(offset)
+      })
+      if (shouldAdvance) {
+        debug.log("results:advance-after-load", { from: previousSelected, offset, added: batch.length })
         advanceSelectionAfterLoad = false
-        if (batch.length > 0) setSelected(total)
       }
     } catch (err) {
       debug.log("results:load-more:error", err instanceof Error ? err.message : String(err))
@@ -212,9 +275,50 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     }
   }
 
+  const loadPreviousResults = (advance = false) => {
+    if (advance) advanceSelectionBeforeLoad = true
+    const base = resultBaseOffset()
+    if (base <= 0) {
+      advanceSelectionBeforeLoad = false
+      return
+    }
+    if (loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
+
+    const q = query().trim()
+    const db = dbPath()
+    const dir = directory
+    const pageSize = q ? searchBatchSize() : recentBatchSize()
+    const offset = Math.max(0, base - pageSize)
+    const limit = base - offset
+
+    setLoadingPreviousResults(true)
+    debug.time("query:load-before")
+    try {
+      const batch = q
+        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir })
+        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir })
+      const nextSelected = advanceSelectionBeforeLoad && batch.length > 0 ? base - 1 : selected()
+      debug.log("results:load-before", { offset, limit, added: batch.length, fromBase: base, toBase: offset, cached: results().length + batch.length, advance })
+      const shouldAdvance = advanceSelectionBeforeLoad
+      solidBatch(() => {
+        setResultBaseOffset(offset)
+        setResults([...batch, ...results()])
+        setResultPageInfo({ loadedUntil: nextResultOffset(), hasMore: hasMore(), pageSize, lastOffset: offset, lastAdded: batch.length })
+        if (shouldAdvance && batch.length > 0) setSelected(nextSelected)
+      })
+      if (shouldAdvance) advanceSelectionBeforeLoad = false
+    } catch (err) {
+      debug.log("results:load-before:error", err instanceof Error ? err.message : String(err))
+      advanceSelectionBeforeLoad = false
+    } finally {
+      debug.timeEnd("query:load-before")
+      setLoadingPreviousResults(false)
+    }
+  }
+
   const scheduleResultPrefetch = (advance = false) => {
     if (advance) advanceSelectionAfterLoad = true
-    if (resultPrefetchTimer || loadingMore() || prefetchingResults()) return
+    if (resultPrefetchTimer || loadingMore() || loadingPreviousResults() || prefetchingResults()) return
     debug.log("results:prefetch-scheduled", { advance, pendingAdvance: advanceSelectionAfterLoad, pageInfo: resultPageInfo() })
     resultPrefetchTimer = setTimeout(() => {
       resultPrefetchTimer = undefined
@@ -222,15 +326,31 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
     }, 1)
   }
 
+  const schedulePreviousResultsLoad = (advance = false) => {
+    if (advance) advanceSelectionBeforeLoad = true
+    if (resultPreviousTimer || loadingMore() || loadingPreviousResults() || prefetchingResults()) return
+    debug.log("results:load-before-scheduled", { advance, pendingAdvance: advanceSelectionBeforeLoad, baseOffset: resultBaseOffset(), pageInfo: resultPageInfo() })
+    resultPreviousTimer = setTimeout(() => {
+      resultPreviousTimer = undefined
+      loadPreviousResults(advanceSelectionBeforeLoad)
+    }, 1)
+  }
+
   const move = (delta: number) => {
     if (results().length === 0) return
     setSelected((index) => {
+      const base = resultBaseOffset()
+      const cachedEnd = base + results().length
       const next = index + delta
       let finalIndex = next
-      if (next < 0) finalIndex = results().length - 1
-      else if (next >= results().length) {
+      if (next < 0) finalIndex = cachedEnd - 1
+      else if (next < base) {
+        schedulePreviousResultsLoad(true)
+        finalIndex = base
+      }
+      else if (next >= cachedEnd) {
         if (hasMore()) scheduleResultPrefetch(true)
-        finalIndex = results().length - 1
+        finalIndex = cachedEnd - 1
       }
        
       if (finalIndex !== index) debug.time("nav:total")
@@ -255,10 +375,10 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
 
   createEffect(() => {
     const index = selected()
-    const total = results().length
+    const total = resultBaseOffset() + results().length
     const threshold = resultPrefetchThreshold()
     if (index < total - threshold) return
-    if (!hasMore() || loadingMore() || prefetchingResults() || busy() || loading()) return
+    if (!hasMore() || loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
 
     const timer = setTimeout(() => scheduleResultPrefetch(false), 100)
     onCleanup(() => clearTimeout(timer))
@@ -557,7 +677,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? (results().length > 0 ? `${selected() + 1}/${results().length} hits` : "0 hits") : (results().length > 0 ? `${selected() + 1}/${results().length} recent` : "0 recent")}</text>
+                <text fg={theme().textMuted}>{busy() ? "searching" : loading() ? "loading..." : query().trim() ? (results().length > 0 ? `${selected() + 1}/${nextResultOffset()} hits` : "0 hits") : (results().length > 0 ? `${selected() + 1}/${nextResultOffset()} recent` : "0 recent")}</text>
               </box>
             </box>
 
