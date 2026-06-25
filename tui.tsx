@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Telescope } from "./telescope.tsx"
+import { loadTelescopeConfig } from "./ui/config.ts"
 
 const id = "opencode-telescope"
 
@@ -13,9 +14,10 @@ const enabled = (options: unknown) => {
 const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
   if (!enabled(options)) return
 
+  const config = loadTelescopeConfig()
   const command = "opencode.telescope.sessions"
   const open = () => {
-    api.ui.dialog.replace(() => <Telescope api={api} onClose={() => api.ui.dialog.clear()} />)
+    api.ui.dialog.replace(() => <Telescope api={api} config={config} onClose={() => api.ui.dialog.clear()} />)
     api.ui.dialog.setSize("xlarge")
   }
 
@@ -30,7 +32,7 @@ const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
         run: open,
       },
     ],
-    bindings: [{ key: "<leader>f", desc: "Search conversations", group: "Search", cmd: open }],
+    bindings: [{ key: config.openKey, desc: "Search conversations", group: "Search", cmd: open }],
   })
 
   api.lifecycle.onDispose(() => {

@@ -18,10 +18,11 @@ import {
 } from "./search.ts"
 import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
-import { isKey, prevent } from "./ui/keyboard.ts"
+import type { TelescopeConfig } from "./ui/config.ts"
+import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
 import { jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
-export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => {
+export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
   type OwnerFilter = "all" | SearchRole
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
@@ -63,7 +64,20 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   const syntax = createMemo(() => syntaxStyle(theme()))
   const ownerRole = createMemo(() => ownerFilter() === "all" ? undefined : ownerFilter() as SearchRole)
   const ownerLabel = createMemo(() => ownerFilter() === "user" ? "you" : ownerFilter())
-  const normalHelpItems = ["j/k move", "d/u scroll", "o owner", "/ search", "enter open", "q close"]
+  const inputKeys = createMemo(() => ({
+    moveDown: inputSafeKeys(props.config.keys.moveDown),
+    moveUp: inputSafeKeys(props.config.keys.moveUp),
+    open: inputSafeKeys(props.config.keys.open),
+    normalMode: inputSafeKeys(props.config.keys.normalMode),
+  }))
+  const normalHelpItems = createMemo(() => [
+    `${keyListLabel(props.config.keys.moveUp)}/${keyListLabel(props.config.keys.moveDown)} move`,
+    `${keyListLabel(props.config.keys.scrollPreviewDown)}/${keyListLabel(props.config.keys.scrollPreviewUp)} scroll`,
+    `${keyListLabel(props.config.keys.toggleOwner)} owner`,
+    `${keyListLabel(props.config.keys.insertMode)} search`,
+    `${keyListLabel(props.config.keys.open)} open`,
+    `${keyListLabel(props.config.keys.close)} close`,
+  ])
   const selectedResult = createMemo(() => results()[selected() - resultBaseOffset()])
   const popupWidth = createMemo(() => Math.max(72, Math.min(dimensions().width - 2, Math.floor(dimensions().width * 0.92))))
   const leftWidth = createMemo(() => Math.max(36, Math.min(64, Math.floor(popupWidth() * 0.36))))
@@ -630,53 +644,47 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
   useKeyboard((evt) => {
     if (!props.api.ui.dialog.open) return
 
-    if (isKey(evt, "down") || isKey(evt, "up")) {
+    if (mode() !== "normal") return
+
+    if (matchesKey(evt, props.config.keys.moveDown) || matchesKey(evt, props.config.keys.moveUp)) {
       prevent(evt)
-      isKey(evt, "down") ? move(1) : move(-1)
+      matchesKey(evt, props.config.keys.moveDown) ? move(1) : move(-1)
       return
     }
 
-    if (isKey(evt, "enter", "return")) {
+    if (matchesKey(evt, props.config.keys.open)) {
       prevent(evt)
       open()
       return
     }
 
-    if (mode() === "normal") {
-      if (isKey(evt, "j")) {
-        prevent(evt)
-        move(1)
-        return
-      }
-      if (isKey(evt, "k")) {
-        prevent(evt)
-        move(-1)
-        return
-      }
-      if (isKey(evt, "q")) {
-        prevent(evt)
-        props.onClose()
-        return
-      }
-      if (isKey(evt, "d")) {
-        scrollPreview(1, evt)
-        return
-      }
-      if (isKey(evt, "u")) {
-        scrollPreview(-1, evt)
-        return
-      }
-      if (isKey(evt, "o")) {
-        prevent(evt)
-        toggleOwnerFilter()
-        return
-      }
-      if (isKey(evt, "/")) {
-        prevent(evt)
-        setMode("insert")
-        focusInput()
-        return
-      }
+    if (matchesKey(evt, props.config.keys.close)) {
+      prevent(evt)
+      props.onClose()
+      return
+    }
+
+    if (matchesKey(evt, props.config.keys.scrollPreviewDown)) {
+      scrollPreview(1, evt)
+      return
+    }
+
+    if (matchesKey(evt, props.config.keys.scrollPreviewUp)) {
+      scrollPreview(-1, evt)
+      return
+    }
+
+    if (matchesKey(evt, props.config.keys.toggleOwner)) {
+      prevent(evt)
+      toggleOwnerFilter()
+      return
+    }
+
+    if (matchesKey(evt, props.config.keys.insertMode)) {
+      prevent(evt)
+      setMode("insert")
+      focusInput()
+      return
     }
   })
 
@@ -707,17 +715,17 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
                   focusedBackgroundColor={theme().backgroundPanel}
                   onInput={(value) => setQuery(value)}
                   onKeyDown={(evt: ParsedKey) => {
-                    if (isKey(evt, "down") || isKey(evt, "up")) {
+                    if (matchesKey(evt, inputKeys().moveDown) || matchesKey(evt, inputKeys().moveUp)) {
                       prevent(evt)
-                      isKey(evt, "down") ? move(1) : move(-1)
+                      matchesKey(evt, inputKeys().moveDown) ? move(1) : move(-1)
                       return
                     }
-                    if (isKey(evt, "enter", "return")) {
+                    if (matchesKey(evt, inputKeys().open)) {
                       prevent(evt)
                       open()
                       return
                     }
-                    if (evt.ctrl && isKey(evt, "q")) {
+                    if (matchesKey(evt, inputKeys().normalMode)) {
                       prevent(evt)
                       setMode("normal")
                       blurInput()
@@ -794,7 +802,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
             <Show when={mode() === "normal"}>
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().accent}><span style={{ bold: true }}>NORMAL</span></text>
-                <For each={normalHelpItems}>
+                <For each={normalHelpItems()}>
                   {(item, index) => (
                     <>
                       <text fg={theme().textMuted}>·</text>
@@ -808,7 +816,7 @@ export const Telescope = (props: { api: TuiPluginApi; onClose: () => void }) => 
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
                 <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>↑/↓ move · ^Q normal</text>
+                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().normalMode)} normal</text>
               </box>
             </Show>
 

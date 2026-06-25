@@ -42,9 +42,47 @@ Add the plugin to your `tui.json`:
 | ---------------- | ----------------------------------------------- |
 | Open search      | `<leader>f` or `/telescope`                     |
 | Type to filter   | Fuzzy match against conversation text           |
-| Navigate results | `↑` / `↓` or `Ctrl+j` / `Ctrl+k`                |
+| Navigate results | `↑` / `↓` or `j` / `k`                          |
 | Preview          | Select a result to see the conversation preview |
 | Open             | Press `Enter` to jump to the selected session   |
+| Owner filter     | Press `o` to cycle `all` / `you` / `assistant`  |
+
+## Configuration
+
+Telescope reads optional plugin-specific config from:
+
+```txt
+~/.config/opencode/opencode-telescope/config.json
+```
+
+If `$XDG_CONFIG_HOME` is set, the path is:
+
+```txt
+$XDG_CONFIG_HOME/opencode/opencode-telescope/config.json
+```
+
+Missing config, invalid JSON, and invalid individual fields are ignored. Defaults are kept for anything not configured.
+
+Example:
+
+```jsonc
+{
+  "openKey": "<leader>f",
+  "keys": {
+    "moveDown": ["down", "j"],
+    "moveUp": ["up", "k"],
+    "scrollPreviewDown": ["d"],
+    "scrollPreviewUp": ["u"],
+    "open": ["enter", "return"],
+    "close": ["q", "escape"],
+    "insertMode": ["/"],
+    "normalMode": ["ctrl+q"],
+    "toggleOwner": ["o"]
+  }
+}
+```
+
+Key strings support simple names like `j`, `k`, `down`, `up`, `enter`, `return`, and `escape`, plus modifier strings like `ctrl+q`.
 
 ## How it works
 
