@@ -46,6 +46,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
   const [prefetchingPreviewBefore, setPrefetchingPreviewBefore] = createSignal(false)
   const [prefetchingPreviewAfter, setPrefetchingPreviewAfter] = createSignal(false)
+  const [previewEdgeLoadingReady, setPreviewEdgeLoadingReady] = createSignal(false)
   const RESULT_BATCH_SIZE = 50
   const RESULT_PREFETCH_AHEAD_ROWS = 25
   const RESULT_OVERSCAN_MULTIPLIER = 2
@@ -89,18 +90,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let previewBeforeTimer: ReturnType<typeof setTimeout> | undefined
   let previewAfterTimer: ReturnType<typeof setTimeout> | undefined
-  let pendingPreviewBefore: { previousContentHeight: number; preserveScroll: boolean; visibleLoad: boolean } | undefined
-  let pendingPreviewAfterVisible = false
+  let pendingPreviewBefore: { itemId: string; previousContentHeight: number; preserveScroll: boolean; visibleLoad: boolean } | undefined
+  let pendingPreviewAfter: { itemId: string; visibleLoad: boolean } | undefined
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
     if (previewAfterTimer) clearTimeout(previewAfterTimer)
     previewBeforeTimer = undefined
     previewAfterTimer = undefined
     pendingPreviewBefore = undefined
-    pendingPreviewAfterVisible = false
+    pendingPreviewAfter = undefined
     setPrefetchingPreviewBefore(false)
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
+    setPreviewEdgeLoadingReady(false)
   }
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
@@ -435,14 +437,20 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     return lastChild ? lastChild.y + lastChild.height : 0
   }
 
-  const loadPreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
+  const resetPreviewScroll = () => {
+    if (!previewScroll || previewScroll.y === 0) return
+    previewScroll.scrollBy(-previewScroll.y)
+  }
+
+  const loadPreviewBefore = (itemId: string, previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
     const item = selectedResult()
     const first = previewParts()[0]
-    if (!item || !first || loadingPreviewMore() || prefetchingPreviewBefore()) return
+    if (!item || item.id !== itemId || !first || loadingPreviewMore() || prefetchingPreviewBefore()) return
     visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewBefore(true)
     debug.time("preview:load-before")
     try {
       const page = loadConversationBefore(item, { id: first.id, timeCreated: first.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      if (selectedResult()?.id !== itemId) return
       debug.log("preview:load-before", {
         item: item.id,
         added: page.parts.length,
@@ -456,6 +464,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         setPreviewParts((prev) => [...page.parts, ...prev])
         if (preserveScroll) {
           setTimeout(() => {
+            if (selectedResult()?.id !== itemId) return
             const delta = previewContentHeight() - previousContentHeight
             if (delta > 0) previewScroll?.scrollBy(delta)
           }, 1)
@@ -470,14 +479,15 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }
   }
 
-  const loadPreviewAfter = (visibleLoad = false) => {
+  const loadPreviewAfter = (itemId: string, visibleLoad = false) => {
     const item = selectedResult()
     const last = previewParts().at(-1)
-    if (!item || !last || loadingPreviewMore() || prefetchingPreviewAfter()) return
+    if (!item || item.id !== itemId || !last || loadingPreviewMore() || prefetchingPreviewAfter()) return
     visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewAfter(true)
     debug.time("preview:load-after")
     try {
       const page = loadConversationAfter(item, { id: last.id, timeCreated: last.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      if (selectedResult()?.id !== itemId) return
       debug.log("preview:load-after", {
         item: item.id,
         added: page.parts.length,
@@ -497,7 +507,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   }
 
   const schedulePreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
-    if (!hasMorePreviewBefore() || loadingPreviewMore() || prefetchingPreviewBefore()) return
+    const item = selectedResult()
+    if (!item || !hasMorePreviewBefore() || loadingPreviewMore() || prefetchingPreviewBefore()) return
     if (previewBeforeTimer) {
       if (pendingPreviewBefore) {
         pendingPreviewBefore.preserveScroll = pendingPreviewBefore.preserveScroll && preserveScroll
@@ -505,26 +516,27 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       }
       return
     }
-    pendingPreviewBefore = { previousContentHeight, preserveScroll, visibleLoad }
-    debug.log("preview:prefetch-before-scheduled", { preserveScroll, visibleLoad })
+    pendingPreviewBefore = { itemId: item.id, previousContentHeight, preserveScroll, visibleLoad }
+    debug.log("preview:prefetch-before-scheduled", { item: item.id, preserveScroll, visibleLoad })
     previewBeforeTimer = setTimeout(() => {
       const pending = pendingPreviewBefore
       previewBeforeTimer = undefined
       pendingPreviewBefore = undefined
-      if (pending) loadPreviewBefore(pending.previousContentHeight, pending.preserveScroll, pending.visibleLoad)
+      if (pending && selectedResult()?.id === pending.itemId) loadPreviewBefore(pending.itemId, pending.previousContentHeight, pending.preserveScroll, pending.visibleLoad)
     }, 1)
   }
 
   const schedulePreviewAfter = (visibleLoad = false) => {
-    if (!hasMorePreviewAfter() || loadingPreviewMore() || prefetchingPreviewAfter()) return
-    pendingPreviewAfterVisible = pendingPreviewAfterVisible || visibleLoad
+    const item = selectedResult()
+    if (!item || !hasMorePreviewAfter() || loadingPreviewMore() || prefetchingPreviewAfter()) return
+    pendingPreviewAfter = { itemId: item.id, visibleLoad: (pendingPreviewAfter?.visibleLoad || visibleLoad) }
     if (previewAfterTimer) return
-    debug.log("preview:prefetch-after-scheduled", { visibleLoad })
+    debug.log("preview:prefetch-after-scheduled", { item: item.id, visibleLoad })
     previewAfterTimer = setTimeout(() => {
-      const pendingVisibleLoad = pendingPreviewAfterVisible
+      const pending = pendingPreviewAfter
       previewAfterTimer = undefined
-      pendingPreviewAfterVisible = false
-      loadPreviewAfter(pendingVisibleLoad)
+      pendingPreviewAfter = undefined
+      if (pending && selectedResult()?.id === pending.itemId) loadPreviewAfter(pending.itemId, pending.visibleLoad)
     }, 1)
   }
 
@@ -541,6 +553,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (item.id === lastPreviewItemId) return
     lastPreviewItemId = item.id
     cancelPreviewPrefetch()
+    resetPreviewScroll()
     debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
     debug.time("preview:load")
@@ -555,9 +568,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         first: page.parts[0]?.id,
         last: page.parts.at(-1)?.id,
       })
-      setPreviewParts(page.parts)
-      setHasMorePreviewBefore(page.hasMoreBefore)
-      setHasMorePreviewAfter(page.hasMoreAfter)
+      solidBatch(() => {
+        setPreviewParts(page.parts)
+        setHasMorePreviewBefore(page.hasMoreBefore)
+        setHasMorePreviewAfter(page.hasMoreAfter)
+      })
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
@@ -567,7 +582,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const item = selectedResult()
     if (!item) return
     const interval = setInterval(() => {
-      if (loadingPreviewMore() || prefetchingPreviewBefore() || prefetchingPreviewAfter()) return
+      if (!previewEdgeLoadingReady() || loadingPreviewMore() || prefetchingPreviewBefore() || prefetchingPreviewAfter()) return
       const scroll = previewScroll
       const children = scroll?.getChildren()
       if (!scroll || !children || children.length === 0) return
@@ -608,8 +623,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (!item) return
     if (item.id === scrolledItem) return
     scrolledItem = item.id
-    const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
-    onCleanup(() => clearTimeout(timer))
+    const itemId = item.id
+    let readyTimer: ReturnType<typeof setTimeout> | undefined
+    const timer = setTimeout(() => {
+      if (selectedResult()?.id !== itemId) return
+      scrollPreviewToTarget(previewScroll, messageTargetID(item))
+      readyTimer = setTimeout(() => {
+        if (selectedResult()?.id === itemId) setPreviewEdgeLoadingReady(true)
+      }, 100)
+    }, 1)
+    onCleanup(() => {
+      clearTimeout(timer)
+      if (readyTimer) clearTimeout(readyTimer)
+    })
   })
 
   const open = () => {
