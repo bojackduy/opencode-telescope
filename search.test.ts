@@ -33,6 +33,23 @@ describe("session search helpers", () => {
     ).toContain("validateSession")
   })
 
+  test("extracts apply_patch tool input text", () => {
+    expect(
+      extractSearchText(
+        JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {
+              patchText: "*** Begin Patch\n+function validateForSubmit() { return true }\n*** End Patch",
+            },
+          },
+        }),
+      ),
+    ).toContain("validateForSubmit")
+  })
+
   test("builds focused snippets", () => {
     expect(makeSnippet("a ".repeat(100) + "needle" + " b".repeat(100), "needle")).toContain("needle")
   })
@@ -171,6 +188,39 @@ describe("session search helpers", () => {
     }
   })
 
+  test("searches code snippets stored in apply_patch tool parts", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-tool-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Patch Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_tool", "msg_1", "ses_1", 1, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: {
+              patchText: "*** Begin Patch\n+const validateForSubmit = () => true\n*** End Patch",
+            },
+          },
+        }))
+
+      const results = searchSessionMessages("validateForSubmit", { dbPath, directory: dir, limit: 10 })
+      expect(results.map((item) => item.id)).toEqual(["prt_tool"])
+      expect(results[0]?.text).toContain("validateForSubmit")
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("filters recent messages by role", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-role-"))
     const dbPath = path.join(dir, "opencode.db")
@@ -243,6 +293,7 @@ function previewResult(id: string, messageID: string, sessionID: string, directo
     sessionTitle: "Test",
     directory,
     role: "assistant",
+    partType: "text",
     timeCreated,
     snippet: "",
     matchStart: 0,

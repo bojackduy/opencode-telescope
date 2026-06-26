@@ -6,6 +6,8 @@ export function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
 }
 
 export function messageTargetID(item: SearchResult) {
+  if (item.partType === "tool") return `tool-inline-${item.messageID}-${item.id}`
+  if (item.partType === "reasoning") return `text-${item.messageID}-${item.id}`
   if (item.role === "assistant") return `text-${item.messageID}-${item.id}`
   return item.messageID
 }

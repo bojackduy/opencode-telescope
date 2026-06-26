@@ -46,11 +46,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
   const [prefetchingPreviewBefore, setPrefetchingPreviewBefore] = createSignal(false)
   const [prefetchingPreviewAfter, setPrefetchingPreviewAfter] = createSignal(false)
-  const MIN_SEARCH_BATCH_SIZE = 25
-  const MIN_RECENT_BATCH_SIZE = 15
+  const RESULT_BATCH_SIZE = 50
+  const RESULT_PREFETCH_AHEAD_ROWS = 25
   const RESULT_OVERSCAN_MULTIPLIER = 2
-  const RESULT_BATCH_VIEWPORTS = 4
-  const RESULT_PREFETCH_VIEWPORTS = 10
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
@@ -115,9 +113,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const viewportHeight = resultScroll?.height || Math.max(8, height() - 7)
     return Math.max(5, Math.floor(viewportHeight / resultRowHeight()))
   }
-  const searchBatchSize = () => Math.max(MIN_SEARCH_BATCH_SIZE, visibleResultRows() * RESULT_BATCH_VIEWPORTS)
-  const recentBatchSize = () => Math.max(MIN_RECENT_BATCH_SIZE, visibleResultRows() * RESULT_BATCH_VIEWPORTS)
-  const resultPrefetchThreshold = () => visibleResultRows() * RESULT_PREFETCH_VIEWPORTS
+  const searchBatchSize = () => RESULT_BATCH_SIZE
+  const recentBatchSize = () => RESULT_BATCH_SIZE
+  const resultPrefetchThreshold = () => RESULT_PREFETCH_AHEAD_ROWS
   const resultPrefetchState = () => {
     const cachedEnd = resultBaseOffset() + results().length
     const rowsAhead = Math.max(0, cachedEnd - selected() - 1)
