@@ -11,7 +11,6 @@ export type SearchResult = {
   sessionTitle: string
   directory: string
   role: "user" | "assistant"
-  partType: "text" | "reasoning" | "tool" | "patch"
   timeCreated: number
   snippet: string
   matchStart: number
@@ -68,13 +67,8 @@ type Row = {
   session_title: string | null
   directory: string
   role: SearchRole
-  part_type?: SearchResult["partType"]
   time_created: number
   text: string
-}
-
-type SourceRow = Omit<Row, "text"> & {
-  data: string
 }
 
 type ConversationRow = {
@@ -324,7 +318,6 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     sessionTitle: row.session_title || "Untitled session",
     directory: row.directory,
     role: row.role,
-    partType: row.part_type ?? "text",
     timeCreated: row.time_created,
     snippet: makeSnippet(text, query),
     matchStart: match.start,
@@ -344,7 +337,7 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
 
 export function extractSearchText(data: string) {
   try {
-    return searchablePartText(JSON.parse(data)).replace(/\s+/g, " ").trim()
+    return extractFromValue(JSON.parse(data)).replace(/\s+/g, " ").trim()
   } catch {
     return data.replace(/\s+/g, " ").trim()
   }
@@ -576,7 +569,7 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
     debug.time("query:fts:exec")
     const rows = index.query<Row, (string | number)[]>(`
       SELECT id, message_id, session_id, session_title, directory, role,
-             part_type, CAST(time_created AS INTEGER) AS time_created, text
+             CAST(time_created AS INTEGER) AS time_created, text
       FROM document_fts
       WHERE ${conditions.join(" AND ")}
       ORDER BY bm25(document_fts), CAST(time_created AS INTEGER) DESC
@@ -593,7 +586,7 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
 function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number, role?: SearchRole) {
   const offsetClause = offset ? "OFFSET ?" : ""
   const conditions: string[] = [
-    "json_extract(p.data, '$.type') IN ('text', 'reasoning', 'tool', 'patch')",
+    "json_extract(p.data, '$.type') = 'text'",
     role ? "json_extract(m.data, '$.role') = ?" : "json_extract(m.data, '$.role') IN ('user', 'assistant')",
   ]
   const params: (string | number)[] = []
@@ -607,7 +600,7 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
 
   const tokens = query ? query.trim().split(/\s+/).filter(Boolean) : []
   for (const token of tokens) {
-    conditions.push("p.data LIKE ?")
+    conditions.push("json_extract(p.data, '$.text') LIKE ?")
     params.push(`%${token}%`)
   }
 
@@ -617,9 +610,8 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
   const sql = `
     SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
            json_extract(m.data, '$.role') AS role,
-           json_extract(p.data, '$.type') AS part_type,
            p.time_created,
-           p.data
+           json_extract(p.data, '$.text') AS text
     FROM part p
     JOIN message m ON m.id = p.message_id
     JOIN session s ON s.id = p.session_id
@@ -628,9 +620,9 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
     LIMIT ? ${offsetClause}
   `
   debug.time("query:sql:exec")
-  const rows = db.query<SourceRow, (string | number)[]>(sql).all(...params as any[])
+  const rows = db.query<Row, (string | number)[]>(sql).all(...params as any[])
   debug.timeEnd("query:sql:exec")
-  return rows.flatMap(sourceRowToSearchRow)
+  return rows
 }
 
 function ensureSearchIndex(source: Database, sourcePath: string) {
@@ -646,14 +638,11 @@ function ensureSearchIndex(source: Database, sourcePath: string) {
   const currentDataVersion = getMeta(_indexDb, "source_data_version")
   const currentMtimeMs = getMeta(_indexDb, "source_mtime_ms")
   const currentPath = getMeta(_indexDb, "source_path")
-  const currentIndexVersion = getMeta(_indexDb, "index_version")
-  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
+  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs)) {
     rebuildSearchIndex(source, _indexDb, sourcePath, state)
   }
   return _indexDb
 }
-
-const SEARCH_INDEX_VERSION = "2"
 
 function searchIndexPath(sourcePath: string) {
   const parsed = path.parse(sourcePath)
@@ -673,31 +662,11 @@ function migrateSearchIndex(db: Database) {
       session_title,
       directory UNINDEXED,
       role UNINDEXED,
-      part_type UNINDEXED,
       time_created UNINDEXED,
       text,
       tokenize='unicode61'
     );
   `)
-
-  const hasPartType = db.query<{ name: string }, []>("PRAGMA table_info(document_fts)").all().some((column) => column.name === "part_type")
-  if (!hasPartType) {
-    db.exec("DROP TABLE document_fts")
-    db.exec(`
-      CREATE VIRTUAL TABLE document_fts USING fts5(
-        id UNINDEXED,
-        message_id UNINDEXED,
-        session_id UNINDEXED,
-        session_title,
-        directory UNINDEXED,
-        role UNINDEXED,
-        part_type UNINDEXED,
-        time_created UNINDEXED,
-        text,
-        tokenize='unicode61'
-      );
-    `)
-  }
 }
 
 function sourceState(db: Database, sourcePath: string) {
@@ -708,27 +677,27 @@ function sourceState(db: Database, sourcePath: string) {
 
 function rebuildSearchIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
   debug.time("fts:rebuild")
-  const rows = source.query<SourceRow, []>(`
+  const rows = source.query<Row, []>(`
     SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
-            json_extract(m.data, '$.role') AS role,
-            json_extract(p.data, '$.type') AS part_type,
-            p.time_created,
-            p.data
+           json_extract(m.data, '$.role') AS role,
+           p.time_created,
+           json_extract(p.data, '$.text') AS text
     FROM part p
     JOIN message m ON m.id = p.message_id
     JOIN session s ON s.id = p.session_id
-    WHERE json_extract(p.data, '$.type') IN ('text', 'reasoning', 'tool', 'patch')
+    WHERE json_extract(p.data, '$.type') = 'text'
       AND json_extract(m.data, '$.role') IN ('user', 'assistant')
+      AND json_extract(p.data, '$.text') IS NOT NULL
     ORDER BY p.time_created DESC
   `).all()
-  const insert = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], number, string]>(`
-    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, part_type, time_created, text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const insert = index.query<Row, [string, string, string, string, string, string, number, string]>(`
+    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `)
   index.exec("BEGIN IMMEDIATE")
   try {
     index.exec("DELETE FROM document_fts")
-    for (const row of rows.flatMap(sourceRowToSearchRow)) {
+    for (const row of rows) {
       insert.run(
         row.id,
         row.message_id,
@@ -736,7 +705,6 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
         row.session_title ?? "Untitled session",
         row.directory,
         row.role,
-        row.part_type ?? "text",
         row.time_created,
         row.text,
       )
@@ -744,7 +712,6 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     setMeta(index, "source_path", sourcePath)
     setMeta(index, "source_data_version", String(state.dataVersion))
     setMeta(index, "source_mtime_ms", String(state.mtimeMs))
-    setMeta(index, "index_version", SEARCH_INDEX_VERSION)
     index.exec("COMMIT")
   } catch (err) {
     index.exec("ROLLBACK")
@@ -814,28 +781,6 @@ function extractFromValue(value: unknown): string {
     .map(([, item]) => extractFromValue(item))
     .filter(Boolean)
     .join("\n")
-}
-
-function sourceRowToSearchRow(row: SourceRow): Row[] {
-  const text = extractSearchText(row.data)
-  if (!text) return []
-  return [{ ...row, text }]
-}
-
-function searchablePartText(value: unknown): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return extractFromValue(value)
-  const record = value as Record<string, unknown>
-  const type = record.type
-
-  if (type === "text" || type === "reasoning") return typeof record.text === "string" ? record.text : extractFromValue(record)
-  if (type === "patch") return extractFromValue(record.files)
-
-  if (type === "tool") {
-    const state = record.state && typeof record.state === "object" && !Array.isArray(record.state) ? record.state as Record<string, unknown> : undefined
-    return [record.tool, state?.input, state?.output, state?.error].map(extractFromValue).filter(Boolean).join("\n")
-  }
-
-  return extractFromValue(record)
 }
 
 function truncate(value: string, length: number) {
