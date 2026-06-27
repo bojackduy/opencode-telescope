@@ -653,7 +653,7 @@ function ensureSearchIndex(source: Database, sourcePath: string) {
   return _indexDb
 }
 
-const SEARCH_INDEX_VERSION = "3"
+const SEARCH_INDEX_VERSION = "2"
 
 function searchIndexPath(sourcePath: string) {
   const parsed = path.parse(sourcePath)
@@ -832,8 +832,7 @@ function searchablePartText(value: unknown): string {
 
   if (type === "tool") {
     const state = record.state && typeof record.state === "object" && !Array.isArray(record.state) ? record.state as Record<string, unknown> : undefined
-    if (record.tool !== "apply_patch") return ""
-    return extractFromValue(state?.input)
+    return [record.tool, state?.input, state?.output, state?.error].map(extractFromValue).filter(Boolean).join("\n")
   }
 
   return extractFromValue(record)

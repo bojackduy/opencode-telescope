@@ -50,22 +50,6 @@ describe("session search helpers", () => {
     ).toContain("validateForSubmit")
   })
 
-  test("does not extract read tool output text", () => {
-    expect(
-      extractSearchText(
-        JSON.stringify({
-          type: "tool",
-          tool: "read",
-          state: {
-            status: "completed",
-            input: { filePath: "/tmp/secret.ts" },
-            output: "function shouldNotAppearFromReadTool() {}",
-          },
-        }),
-      ),
-    ).toBe("")
-  })
-
   test("builds focused snippets", () => {
     expect(makeSnippet("a ".repeat(100) + "needle" + " b".repeat(100), "needle")).toContain("needle")
   })
