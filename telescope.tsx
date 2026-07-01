@@ -625,7 +625,23 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
   const scrollPreview = (direction: 1 | -1, evt: ParsedKey) => {
     prevent(evt)
-    previewScroll?.scrollBy(direction * previewScrollAmount(previewScroll))
+    const scroll = previewScroll
+    if (!scroll) return
+
+    if (direction < 0 && scroll.y <= 0 && hasMorePreviewBefore()) {
+      schedulePreviewBefore(previewContentHeight(), false, true)
+      return
+    }
+
+    const children = scroll.getChildren()
+    const lastChild = children[children.length - 1] as { y: number; height: number } | undefined
+    const totalContentHeight = lastChild ? lastChild.y + lastChild.height : 0
+    if (direction > 0 && scroll.y + scroll.height >= totalContentHeight - 1 && hasMorePreviewAfter()) {
+      schedulePreviewAfter(true)
+      return
+    }
+
+    scroll.scrollBy(direction * previewScrollAmount(scroll))
   }
 
   const focusInput = () => {

@@ -501,7 +501,7 @@ function parseConversationPart(row: ConversationRow, target: boolean): Conversat
       role: row.role,
       type: row.type,
       timeCreated: row.time_created,
-      text: extractToolIndexText(data).trim(),
+      text: target ? extractToolIndexText(data).trim() : "",
       tool: typeof data.tool === "string" ? data.tool : "tool",
       state: parseToolState(data.state),
       target,
