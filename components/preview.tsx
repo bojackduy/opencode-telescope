@@ -143,8 +143,8 @@ const PreviewToolPart = (props: { part: ConversationPreviewPart; item: SearchRes
       <Show when={props.part.target}>
         <TargetMarker part={props.part} item={props.item} role={props.part.tool ?? "tool"} time={props.part.timeCreated} theme={props.theme} />
       </Show>
-      <Show when={codeTool()} fallback={<CompactToolRow part={props.part} color={color()} failed={failed()} theme={props.theme} />}>
-        <CodeToolPreview part={props.part} syntax={props.syntax} theme={props.theme} />
+      <Show when={codeTool() && props.part.target} fallback={<CompactToolRow part={props.part} color={color()} failed={failed()} theme={props.theme} />}>
+        <CodeToolPreview part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
       </Show>
       <Show when={props.part.state?.error}>
         {(error) => <text fg={props.theme.error}>{error()}</text>}
@@ -167,29 +167,37 @@ const CompactToolRow = (props: { part: ConversationPreviewPart; color: any; fail
   </>
 )
 
-const CodeToolPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
-  if (props.part.tool === "apply_patch") return <ApplyPatchPreview part={props.part} syntax={props.syntax} theme={props.theme} />
-  if (props.part.tool === "edit") return <EditPreview part={props.part} syntax={props.syntax} theme={props.theme} />
-  if (props.part.tool === "write") return <WritePreview part={props.part} syntax={props.syntax} theme={props.theme} />
+const CodeToolPreview = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  if (props.part.tool === "apply_patch") return <ApplyPatchPreview part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
+  if (props.part.tool === "edit") return <EditPreview part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
+  if (props.part.tool === "write") return <WritePreview part={props.part} item={props.item} syntax={props.syntax} theme={props.theme} />
   return <CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />
 }
 
-const ApplyPatchPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+const ApplyPatchPreview = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
   const files = createMemo(() => parseApplyPatchFiles(props.part.state?.metadata))
+  const matched = createMemo(() => {
+    const query = props.item.match || props.item.previewMatch
+    return files().find((file) => containsOrderedTokens(file.patch, query)) ?? files()[0]
+  })
   return (
-    <Show when={files().length > 0} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
-      <For each={files()}>
-        {(file) => (
-          <ToolBlock title={patchTitle(file)} theme={props.theme}>
-            <DiffBlock diff={file.patch} filePath={file.filePath} syntax={props.syntax} theme={props.theme} />
+    <Show when={matched()} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
+      {(file) => {
+        const view = createMemo(() => clippedText(file().patch, props.item.match || props.item.previewMatch, 24))
+        return (
+          <ToolBlock title={patchTitle(file())} theme={props.theme}>
+            <Show when={view().clipped}>
+              <text fg={props.theme.textMuted}>showing matched excerpt from large patch</text>
+            </Show>
+            <DiffBlock diff={view().text} filePath={file().filePath} syntax={props.syntax} theme={props.theme} clipped={view().clipped} />
           </ToolBlock>
-        )}
-      </For>
+        )
+      }}
     </Show>
   )
 }
 
-const EditPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+const EditPreview = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
   const input = createMemo(() => recordValue(props.part.state?.input))
   const metadata = createMemo(() => recordValue(props.part.state?.metadata))
   const diff = createMemo(() => stringValue(metadata()?.diff) ?? stringValue(recordValue(metadata()?.filediff)?.patch) ?? "")
@@ -198,14 +206,24 @@ const EditPreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle
     <Show when={diff()} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
       {(value) => (
         <ToolBlock title={`← Edit ${shortPath(filePath())}`} theme={props.theme}>
-          <DiffBlock diff={value()} filePath={filePath()} syntax={props.syntax} theme={props.theme} />
+          {(() => {
+            const view = createMemo(() => clippedText(value(), props.item.match || props.item.previewMatch, 24))
+            return (
+              <>
+                <Show when={view().clipped}>
+                  <text fg={props.theme.textMuted}>showing matched excerpt from large diff</text>
+                </Show>
+                <DiffBlock diff={view().text} filePath={filePath()} syntax={props.syntax} theme={props.theme} clipped={view().clipped} />
+              </>
+            )
+          })()}
         </ToolBlock>
       )}
     </Show>
   )
 }
 
-const WritePreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+const WritePreview = (props: { part: ConversationPreviewPart; item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
   const input = createMemo(() => recordValue(props.part.state?.input))
   const filePath = createMemo(() => stringValue(input()?.filePath) ?? "")
   const content = createMemo(() => stringValue(input()?.content) ?? "")
@@ -213,15 +231,25 @@ const WritePreview = (props: { part: ConversationPreviewPart; syntax: SyntaxStyl
     <Show when={content()} fallback={<CompactToolRow part={props.part} color={props.theme.textMuted} failed={false} theme={props.theme} />}>
       {(value) => (
         <ToolBlock title={`# Wrote ${shortPath(filePath())}`} theme={props.theme}>
+          {(() => {
+            const view = createMemo(() => clippedText(value(), props.item.match || props.item.previewMatch, 32))
+            return (
+              <>
+                <Show when={view().clipped}>
+                  <text fg={props.theme.textMuted}>showing matched excerpt from large file</text>
+                </Show>
           <line_number fg={props.theme.textMuted} minWidth={3} paddingRight={1}>
             <code
               conceal={false}
               fg={props.theme.text}
               filetype={filetype(filePath())}
               syntaxStyle={props.syntax}
-              content={value()}
+              content={view().text}
             />
           </line_number>
+              </>
+            )
+          })()}
         </ToolBlock>
       )}
     </Show>
@@ -246,27 +274,29 @@ const ToolBlock = (props: { title: string; children: any; theme: TuiThemeCurrent
   </box>
 )
 
-const DiffBlock = (props: { diff: string; filePath: string; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
+const DiffBlock = (props: { diff: string; filePath: string; syntax: SyntaxStyle; theme: TuiThemeCurrent; clipped?: boolean }) => (
   <box paddingLeft={1}>
-    <diff
-      diff={props.diff}
-      view="unified"
-      filetype={filetype(props.filePath)}
-      syntaxStyle={props.syntax}
-      showLineNumbers={true}
-      width="100%"
-      wrapMode="word"
-      fg={props.theme.text}
-      addedBg={props.theme.diffAddedBg}
-      removedBg={props.theme.diffRemovedBg}
-      contextBg={props.theme.diffContextBg}
-      addedSignColor={props.theme.diffHighlightAdded}
-      removedSignColor={props.theme.diffHighlightRemoved}
-      lineNumberFg={props.theme.diffLineNumber}
-      lineNumberBg={props.theme.diffContextBg}
-      addedLineNumberBg={props.theme.diffAddedLineNumberBg}
-      removedLineNumberBg={props.theme.diffRemovedLineNumberBg}
-    />
+    <Show when={!props.clipped} fallback={<code filetype="diff" syntaxStyle={props.syntax} content={props.diff} fg={props.theme.text} />}>
+      <diff
+        diff={props.diff}
+        view="unified"
+        filetype={filetype(props.filePath)}
+        syntaxStyle={props.syntax}
+        showLineNumbers={true}
+        width="100%"
+        wrapMode="word"
+        fg={props.theme.text}
+        addedBg={props.theme.diffAddedBg}
+        removedBg={props.theme.diffRemovedBg}
+        contextBg={props.theme.diffContextBg}
+        addedSignColor={props.theme.diffHighlightAdded}
+        removedSignColor={props.theme.diffHighlightRemoved}
+        lineNumberFg={props.theme.diffLineNumber}
+        lineNumberBg={props.theme.diffContextBg}
+        addedLineNumberBg={props.theme.diffAddedLineNumberBg}
+        removedLineNumberBg={props.theme.diffRemovedLineNumberBg}
+      />
+    </Show>
   </box>
 )
 
@@ -384,6 +414,50 @@ function matchExcerpt(text: string, query: string, radius = 80) {
     match: text.slice(firstStart, lastEnd),
     after: `${text.slice(lastEnd, afterEnd).replace(/\s+/g, " ")}${afterEnd < text.length ? "..." : ""}`,
   }
+}
+
+function clippedText(text: string, query: string, radiusLines: number) {
+  const lines = text.split("\n")
+  const tooLarge = text.length > 30000 || lines.length > 420
+  if (!tooLarge) return { text, clipped: false }
+
+  const matchLine = findOrderedTokenLine(lines, query)
+  if (matchLine === -1) {
+    return { text: lines.slice(0, radiusLines * 2).join("\n"), clipped: true }
+  }
+
+  const start = Math.max(0, matchLine - radiusLines)
+  const end = Math.min(lines.length, matchLine + radiusLines + 1)
+  return {
+    text: [
+      start > 0 ? `... ${start} lines omitted ...` : undefined,
+      ...lines.slice(start, end),
+      end < lines.length ? `... ${lines.length - end} lines omitted ...` : undefined,
+    ].filter(Boolean).join("\n"),
+    clipped: true,
+  }
+}
+
+function findOrderedTokenLine(lines: string[], query: string) {
+  const tokens = query.trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return -1
+  for (let index = 0; index < lines.length; index++) {
+    if (containsOrderedTokens(lines[index]!, query)) return index
+  }
+  return -1
+}
+
+function containsOrderedTokens(text: string, query: string) {
+  const tokens = query.trim().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return false
+  const lower = text.toLowerCase()
+  let searchPos = 0
+  for (const token of tokens) {
+    const index = lower.indexOf(token.toLowerCase(), searchPos)
+    if (index === -1) return false
+    searchPos = index + token.length
+  }
+  return true
 }
 
 function parseApplyPatchFiles(metadata: unknown) {
