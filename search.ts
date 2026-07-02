@@ -95,6 +95,7 @@ let _db: Database | undefined
 let _dbPath: string | undefined
 let _indexDb: Database | undefined
 let _indexDbPath: string | undefined
+const backgroundIndexRebuilds = new Set<string>()
 
 function getDb(dbPath?: string): Database {
   const resolved = dbPath ?? resolveDatabasePath()
@@ -148,8 +149,13 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
-  const db = getDb(options?.dbPath)
-  return visibleTextRows(db, options?.limit ?? 40, undefined, options?.directory, options?.offset, options?.role).flatMap(
+  const dbPath = options?.dbPath ?? resolveDatabasePath()
+  const db = getDb(dbPath)
+  const limit = options?.limit ?? 40
+  const indexed = dbPath === ":memory:" ? undefined : indexedRecentRows(db, dbPath, limit, options?.directory, options?.offset, options?.role)
+  if (indexed) return indexed.flatMap((row) => rowToSearchResult(row, "") ?? [])
+  debug.log("query:recent:source-fallback", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
+  return visibleTextRows(db, limit, undefined, options?.directory, options?.offset, options?.role).flatMap(
     (row) => rowToSearchResult(row, "") ?? [],
   )
 }
@@ -592,6 +598,7 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
   if (!match) return []
   try {
     const index = ensureSearchIndex(db, dbPath)
+    if (!index) return []
     const conditions = ["document_fts MATCH ?"]
     const params: (string | number)[] = [match]
     if (role) {
@@ -618,6 +625,46 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
     return rows
   } catch (err) {
     debug.log("fts:fallback", err instanceof Error ? err.message : String(err))
+    return
+  }
+}
+
+function indexedRecentRows(db: Database, dbPath: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+  try {
+    const index = ensureSearchIndex(db, dbPath, { rebuild: false })
+    if (!index) {
+      scheduleBackgroundIndexRebuild(dbPath)
+      return
+    }
+
+    const conditions: string[] = ["part_type = 'text'"]
+    const params: (string | number)[] = []
+    if (role) {
+      conditions.push("role = ?")
+      params.push(role)
+    }
+    if (directory) {
+      conditions.push("directory = ?")
+      params.push(directory)
+    }
+    params.push(limit)
+    if (offset) params.push(offset)
+
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""
+    const offsetClause = offset ? "OFFSET ?" : ""
+    debug.time("query:recent:index:exec")
+    const rows = index.query<Row, (string | number)[]>(`
+      SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
+             CAST(time_created AS INTEGER) AS time_created, text
+      FROM document_index
+      ${where}
+      ORDER BY CAST(time_created AS INTEGER) DESC
+      LIMIT ? ${offsetClause}
+    `).all(...params as any[])
+    debug.timeEnd("query:recent:index:exec")
+    return rows
+  } catch (err) {
+    debug.log("recent:index:fallback", err instanceof Error ? err.message : String(err))
     return
   }
 }
@@ -664,7 +711,7 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
   return rows
 }
 
-function ensureSearchIndex(source: Database, sourcePath: string) {
+function ensureSearchIndex(source: Database, sourcePath: string, options?: { rebuild?: boolean }) {
   const indexPath = searchIndexPath(sourcePath)
   if (!_indexDb || _indexDbPath !== indexPath) {
     _indexDb?.close()
@@ -679,12 +726,32 @@ function ensureSearchIndex(source: Database, sourcePath: string) {
   const currentPath = getMeta(_indexDb, "source_path")
   const currentIndexVersion = getMeta(_indexDb, "index_version")
   if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
+    if (options?.rebuild === false) return
     rebuildSearchIndex(source, _indexDb, sourcePath, state)
   }
   return _indexDb
 }
 
-const SEARCH_INDEX_VERSION = "4"
+function scheduleBackgroundIndexRebuild(dbPath: string) {
+  if (backgroundIndexRebuilds.has(dbPath)) return
+  backgroundIndexRebuilds.add(dbPath)
+  debug.log("fts:rebuild:background-scheduled", { dbPath })
+  const timer = setTimeout(() => {
+    debug.time("fts:rebuild:background")
+    try {
+      const db = getDb(dbPath)
+      ensureSearchIndex(db, dbPath)
+    } catch (err) {
+      debug.log("fts:rebuild:background:error", err instanceof Error ? err.message : String(err))
+    } finally {
+      backgroundIndexRebuilds.delete(dbPath)
+      debug.timeEnd("fts:rebuild:background")
+    }
+  }, 250)
+  ;(timer as { unref?: () => void }).unref?.()
+}
+
+const SEARCH_INDEX_VERSION = "6"
 
 function searchIndexPath(sourcePath: string) {
   const parsed = path.parse(sourcePath)
@@ -710,6 +777,24 @@ function migrateSearchIndex(db: Database) {
       text,
       tokenize='unicode61'
     );
+    CREATE TABLE IF NOT EXISTS document_index(
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      session_title TEXT NOT NULL,
+      directory TEXT NOT NULL,
+      role TEXT NOT NULL,
+      part_type TEXT NOT NULL,
+      tool TEXT,
+      time_created INTEGER NOT NULL,
+      text TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS document_index_recent_idx
+      ON document_index(directory, role, time_created DESC);
+    CREATE INDEX IF NOT EXISTS document_index_recent_text_idx
+      ON document_index(directory, role, part_type, time_created DESC);
+    CREATE INDEX IF NOT EXISTS document_index_time_idx
+      ON document_index(time_created DESC);
   `)
 
   const columns = db.query<{ name: string }, []>("PRAGMA table_info(document_fts)").all().map((column) => column.name)
@@ -731,6 +816,33 @@ function migrateSearchIndex(db: Database) {
       );
     `)
   }
+
+  const indexColumns = db.query<{ name: string }, []>("PRAGMA table_info(document_index)").all().map((column) => column.name)
+  if (!["part_type", "tool", "time_created", "text"].every((name) => indexColumns.includes(name))) {
+    db.exec("DROP TABLE IF EXISTS document_index")
+    db.exec(`
+      CREATE TABLE document_index(
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        session_title TEXT NOT NULL,
+        directory TEXT NOT NULL,
+        role TEXT NOT NULL,
+        part_type TEXT NOT NULL,
+        tool TEXT,
+        time_created INTEGER NOT NULL,
+        text TEXT NOT NULL
+      );
+    `)
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS document_index_recent_idx
+      ON document_index(directory, role, time_created DESC);
+    CREATE INDEX IF NOT EXISTS document_index_recent_text_idx
+      ON document_index(directory, role, part_type, time_created DESC);
+    CREATE INDEX IF NOT EXISTS document_index_time_idx
+      ON document_index(time_created DESC);
+  `)
 }
 
 function sourceState(db: Database, sourcePath: string) {
@@ -765,11 +877,28 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
+  const insertIndex = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
+    INSERT INTO document_index(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
   index.exec("BEGIN IMMEDIATE")
   try {
     index.exec("DELETE FROM document_fts")
+    index.exec("DELETE FROM document_index")
     for (const row of rows.flatMap(indexSourceRowToRows)) {
       insert.run(
+        row.id,
+        row.message_id,
+        row.session_id,
+        row.session_title ?? "Untitled session",
+        row.directory,
+        row.role,
+        row.part_type ?? "text",
+        row.tool ?? null,
+        row.time_created,
+        row.text,
+      )
+      insertIndex.run(
         row.id,
         row.message_id,
         row.session_id,

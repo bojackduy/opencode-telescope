@@ -165,6 +165,8 @@ describe("session search helpers", () => {
         .run("prt_2", "msg_1", "ses_1", 2, JSON.stringify({ type: "text", text: "second beta" }))
 
       expect(searchSessionMessages("second", { dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2"])
+      expect(recentSessionMessages({ dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_4", "prt_2", "prt_1"])
+      expect(recentSessionMessages({ dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_2", "prt_1"])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })

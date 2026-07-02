@@ -52,7 +52,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
   const RESULT_BATCH_VIEWPORTS = 4
-  const RESULT_PREFETCH_VIEWPORTS = 10
+  const RESULT_PREFETCH_VIEWPORTS = 3
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
@@ -89,6 +89,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const directory = props.api.state.path.directory
   let advanceSelectionAfterLoad = false
   let advanceSelectionBeforeLoad = false
+  let resultNavigationStarted = false
   let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let previewBeforeTimer: ReturnType<typeof setTimeout> | undefined
@@ -180,6 +181,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     resultPreviousTimer = undefined
     advanceSelectionAfterLoad = false
     advanceSelectionBeforeLoad = false
+    resultNavigationStarted = false
     setLoadingMore(false)
     setLoadingPreviousResults(false)
     setPrefetchingResults(false)
@@ -190,9 +192,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       setLoading(true)
       const limit = recentBatchSize()
       const timer = setTimeout(() => {
+        debug.log("bootstrap:recent:start", { limit, directory: dir, role })
         debug.time("query:recent")
         try {
           const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
+          debug.log("bootstrap:recent:done", { rows: batch.length, limit })
           solidBatch(() => {
             setResults(batch)
             setResultBaseOffset(0)
@@ -202,6 +206,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             setSelected(0)
           })
         } catch (err) {
+          debug.log("bootstrap:recent:error", err instanceof Error ? err.message : String(err))
           solidBatch(() => {
             setResults([])
             setResultBaseOffset(0)
@@ -223,7 +228,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const timer = setTimeout(() => {
       debug.time("query:search")
       try {
+        debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q })
         const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir, role })
+        debug.log("bootstrap:search:done", { rows: batch.length, limit })
         solidBatch(() => {
           setResults(batch)
           setResultBaseOffset(0)
@@ -373,6 +380,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
   const move = (delta: number) => {
     if (results().length === 0) return
+    resultNavigationStarted = true
     setSelected((index) => {
       const base = resultBaseOffset()
       const cachedEnd = base + results().length
@@ -412,6 +420,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const state = resultPrefetchState()
     const blockedBy = !hasMore()
       ? "no-more"
+      : !resultNavigationStarted
+        ? "waiting-for-navigation"
       : loadingMore()
         ? "loading-more"
         : loadingPreviousResults()
