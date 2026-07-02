@@ -109,6 +109,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let pendingPreviewAfterVisible = false
   let previewBeforeAdjusting = false
   let pendingCoalescedExplicit: { requestedAmount: number } | undefined
+  let pendingPreviewAnchorCorrection: { anchorPartID: string; visualOffset: number; createdAt: number; expiresAt: number } | undefined
   const previewMeasuredHeights = new Map<string, number>()
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
@@ -119,6 +120,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     pendingPreviewAfterVisible = false
     previewBeforeAdjusting = false
     pendingCoalescedExplicit = undefined
+    pendingPreviewAnchorCorrection = undefined
     setPrefetchingPreviewBefore(false)
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
@@ -504,15 +506,31 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
   const previewPartHeight = (part: ConversationPreviewPart) => previewMeasuredHeights.get(part.id) ?? estimatePreviewPartHeight(part)
 
-  const previewVirtualLayout = createMemo(() => {
-    previewHeightVersion()
+  const buildPreviewLayout = (parts: ConversationPreviewPart[]) => {
     let offset = 0
-    return previewParts().map((part) => {
+    return parts.map((part) => {
       const height = previewPartHeight(part)
       const row = { part, top: offset, bottom: offset + height, height }
       offset += height
       return row
     })
+  }
+
+  const previewWindowForLayout = (layout: ReturnType<typeof buildPreviewLayout>, scrollTop: number, viewportHeight: number) => {
+    if (layout.length === 0) return { start: 0, end: 0 }
+    const overscan = Math.max(viewportHeight * 2, 40)
+    const from = Math.max(0, scrollTop - overscan)
+    const to = scrollTop + viewportHeight + overscan
+    const foundStart = layout.findIndex((row) => row.bottom >= from)
+    const start = foundStart === -1 ? Math.max(0, layout.length - 1) : Math.max(0, foundStart)
+    const foundEnd = layout.findIndex((row) => row.top > to)
+    const end = foundEnd === -1 ? layout.length : foundEnd
+    return { start, end: Math.min(layout.length, Math.max(start + 1, end)) }
+  }
+
+  const previewVirtualLayout = createMemo(() => {
+    previewHeightVersion()
+    return buildPreviewLayout(previewParts())
   })
 
   const previewContentHeight = () => previewVirtualLayout().at(-1)?.bottom ?? 0
@@ -531,14 +549,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       return
     }
 
-    const overscan = Math.max(scroll.height * 2, 40)
-    const from = Math.max(0, scroll.scrollTop - overscan)
-    const to = scroll.scrollTop + scroll.height + overscan
-    const foundStart = layout.findIndex((row) => row.bottom >= from)
-    const start = foundStart === -1 ? Math.max(0, layout.length - 1) : Math.max(0, foundStart)
-    const foundEnd = layout.findIndex((row) => row.top > to)
-    const end = foundEnd === -1 ? layout.length : foundEnd
-    const next = { start, end: Math.min(layout.length, Math.max(start + 1, end)) }
+    const next = previewWindowForLayout(layout, scroll.scrollTop, scroll.height)
     const current = previewWindow()
     if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
   }
@@ -603,6 +614,29 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         totalMeasured: previewMeasuredHeights.size,
         window: previewWindow(),
       })
+      const anchorCorrection = pendingPreviewAnchorCorrection
+      if (anchorCorrection && scroll) {
+        const now = Date.now()
+        const shouldCorrect = now <= anchorCorrection.expiresAt && lastPreviewScrollKeyMs <= anchorCorrection.createdAt
+        if (shouldCorrect) {
+          const nextLayout = buildPreviewLayout(previewParts())
+          const anchor = nextLayout.find((row) => row.part.id === anchorCorrection.anchorPartID)
+          if (anchor) {
+            const correctedScrollTop = Math.max(0, anchor.top + anchorCorrection.visualOffset)
+            const correctedWindow = previewWindowForLayout(nextLayout, correctedScrollTop, scroll.height)
+            setPreviewWindow(correctedWindow)
+            scroll.scrollTo(correctedScrollTop)
+            debug.log("preview:measure:anchor-correct", {
+              anchorPartID: anchorCorrection.anchorPartID,
+              visualOffset: anchorCorrection.visualOffset,
+              correctedScrollTop,
+              window: correctedWindow,
+            })
+          }
+        } else {
+          pendingPreviewAnchorCorrection = undefined
+        }
+      }
       setPreviewHeightVersion((value) => value + 1)
       setTimeout(updatePreviewWindow, 1)
     }
@@ -634,6 +668,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       return
     }
     const beforeState = previewScrollState()
+    const beforeLayout = previewVirtualLayout()
+    const scrollTop = previewScroll?.scrollTop ?? pending.previousScrollTop
+    const anchor = beforeLayout.find((row) => row.bottom >= scrollTop) ?? beforeLayout[0]
+    const anchorPartID = anchor?.part.id ?? first.id
+    const offsetInAnchor = anchor ? scrollTop - anchor.top : 0
     pending.visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewBefore(true)
     debug.time("preview:load-before")
     try {
@@ -643,6 +682,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         cursor: { id: first.id, timeCreated: first.timeCreated },
         previousContentHeight: pending.previousContentHeight,
         previousScrollTop: pending.previousScrollTop,
+        anchorPartID,
+        offsetInAnchor,
         requestedAmount: pending.requestedAmount,
         visibleLoad: pending.visibleLoad,
         state: beforeState,
@@ -658,25 +699,27 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       if (page.parts.length > 0) {
         const currentParts = previewParts()
         const nextParts = [...page.parts, ...currentParts]
-
-        const anchorPartID = first.id
-        const offsetInAnchor = pending.previousScrollTop
-
-        let newPartsHeight = 0
-        for (const part of page.parts) {
-          newPartsHeight += previewMeasuredHeights.get(part.id) ?? estimatePreviewPartHeight(part)
-        }
-
-        const anchorPredictedTop = newPartsHeight
-        const addedHeight = newPartsHeight
+        const nextLayout = buildPreviewLayout(nextParts)
+        const anchorPredicted = nextLayout.find((row) => row.part.id === anchorPartID)
+        const anchorPredictedTop = anchorPredicted?.top ?? 0
+        const visualOffset = offsetInAnchor - (pending.intent === "explicit-scroll" ? pending.requestedAmount : 0)
         const targetScrollTop = pending.intent === "explicit-scroll"
           ? Math.max(0, anchorPredictedTop + offsetInAnchor - pending.requestedAmount)
           : anchorPredictedTop + offsetInAnchor
+        const nextWindow = previewWindowForLayout(nextLayout, targetScrollTop, previewScroll?.height ?? Math.max(8, height() - 7))
 
-        setPreviewParts(nextParts)
+        solidBatch(() => {
+          setPreviewParts(nextParts)
+          setPreviewWindow(nextWindow)
+        })
 
-        if (previewScroll && addedHeight > 0) {
-          previewScroll.scrollTo(targetScrollTop)
+        previewScroll?.scrollTo(targetScrollTop)
+        const anchorCorrectionCreatedAt = Date.now()
+        pendingPreviewAnchorCorrection = {
+          anchorPartID,
+          visualOffset,
+          createdAt: anchorCorrectionCreatedAt,
+          expiresAt: anchorCorrectionCreatedAt + 300,
         }
 
         debug.log("preview:load-before:commit", {
@@ -684,8 +727,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           anchorPartID,
           anchorPredictedTop,
           offsetInAnchor,
-          addedHeight,
+          visualOffset,
           targetScrollTop,
+          window: nextWindow,
           intent: pending.intent,
           newParts: page.parts.length,
           totalParts: nextParts.length,
@@ -700,14 +744,16 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
           if (Math.abs(drift) >= 1 && previewScroll) {
             const correctedScrollTop = targetScrollTop + drift
+            const correctedWindow = previewWindowForLayout(newLayout, correctedScrollTop, previewScroll.height)
+            setPreviewWindow(correctedWindow)
             previewScroll.scrollTo(correctedScrollTop)
-            updatePreviewWindow()
             debug.log("preview:load-before:drift-correct", {
               loadID: pending.id,
               drift,
               anchorPredictedTop,
               actualAnchorTop,
               correctedScrollTop,
+              window: correctedWindow,
             })
           } else {
             updatePreviewWindow()
@@ -741,7 +787,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     } finally {
       debug.timeEnd("preview:load-before")
       lastBeforeLoadMs = Date.now()
-      lastPreviewScrollKeyMs = 0
       pending.visibleLoad ? setLoadingPreviewMore(false) : setPrefetchingPreviewBefore(false)
     }
   }
