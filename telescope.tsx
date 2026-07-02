@@ -107,6 +107,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewAfterTimer: ReturnType<typeof setTimeout> | undefined
   let pendingPreviewBefore: PendingPreviewBefore | undefined
   let pendingPreviewAfterVisible = false
+  let previewBeforeAdjusting = false
+  let pendingCoalescedExplicit: { requestedAmount: number } | undefined
   const previewMeasuredHeights = new Map<string, number>()
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
@@ -115,6 +117,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     previewAfterTimer = undefined
     pendingPreviewBefore = undefined
     pendingPreviewAfterVisible = false
+    previewBeforeAdjusting = false
+    pendingCoalescedExplicit = undefined
     setPrefetchingPreviewBefore(false)
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
@@ -653,6 +657,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       })
       if (page.parts.length > 0) {
         setPreviewParts((prev) => [...page.parts, ...prev])
+        previewBeforeAdjusting = true
         setTimeout(() => {
           const beforeAdjust = previewScrollState()
           const newContentHeight = previewContentHeight()
@@ -680,6 +685,24 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             actualDelta: (previewScrollState().scrollTop ?? 0) - (beforeAdjust.scrollTop ?? 0),
             drift: (previewScrollState().scrollTop ?? 0) - plannedScrollTop,
           })
+          previewBeforeAdjusting = false
+          const coalesced = pendingCoalescedExplicit
+          if (coalesced) {
+            pendingCoalescedExplicit = undefined
+            const scroll = previewScroll
+            if (scroll) {
+              debug.log("preview:before:coalesce-replay", {
+                requestedAmount: coalesced.requestedAmount,
+                state: previewScrollState(),
+              })
+              schedulePreviewBefore({
+                intent: "explicit-scroll",
+                visibleLoad: true,
+                requestedAmount: coalesced.requestedAmount,
+                previousScrollTop: scroll.scrollTop,
+              })
+            }
+          }
         }, 1)
       }
       setHasMorePreviewBefore(page.hasMoreBefore)
@@ -759,6 +782,29 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         visibleLoad,
         state: previewScrollState(),
       })
+      return
+    }
+    if (previewBeforeAdjusting) {
+      if (opts.intent === "explicit-scroll") {
+        pendingCoalescedExplicit = { requestedAmount }
+        debug.log("preview:before:coalesce-explicit", {
+          loadID: id,
+          requestedAmount,
+          state: previewScrollState(),
+        })
+      } else {
+        debug.log("preview:before:schedule-skip", {
+          loadID: id,
+          reason: "adjusting",
+          source,
+          intent: opts.intent,
+          previousContentHeight,
+          previousScrollTop,
+          requestedAmount,
+          visibleLoad,
+          state: previewScrollState(),
+        })
+      }
       return
     }
     if (previewBeforeTimer) {
@@ -900,6 +946,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (!item) return
     const interval = setInterval(() => {
       if (loadingPreviewMore() || prefetchingPreviewBefore() || prefetchingPreviewAfter()) return
+      if (previewBeforeAdjusting) return
       const scroll = previewScroll
       const children = scroll?.getChildren()
       if (!scroll || !children || children.length === 0) return
