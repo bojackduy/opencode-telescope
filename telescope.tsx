@@ -53,7 +53,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
   const RESULT_BATCH_VIEWPORTS = 4
-  const RESULT_PREFETCH_VIEWPORTS = 3
+  const RESULT_PREFETCH_VIEWPORTS = 5
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 20
   const INITIAL_PREVIEW_AFTER = 30
@@ -150,6 +150,12 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const cachedEnd = Math.min(cached.length, index + visible + overscan - base)
     return { start: base + cachedStart, end: base + cachedEnd, items: cached.slice(cachedStart, cachedEnd) }
   })
+
+  const resultTopSpacerHeight = () =>
+    Math.max(0, resultRenderWindow().start - resultBaseOffset()) * resultRowHeight()
+
+  const resultBottomSpacerHeight = () =>
+    Math.max(0, resultBaseOffset() + results().length - resultRenderWindow().end) * resultRowHeight()
 
   let lastResultRenderWindow = ""
   createEffect(() => {
@@ -444,6 +450,31 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     const timer = setTimeout(() => scheduleResultPrefetch(false), 100)
     onCleanup(() => clearTimeout(timer))
+  })
+
+  createEffect(() => {
+    if (!resultNavigationStarted || !hasMore()) return
+    const interval = setInterval(() => {
+      if (!hasMore() || loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
+      const scroll = resultScroll
+      if (!scroll) return
+      const children = scroll.getChildren()
+      if (!children || children.length === 0) return
+      const lastChild = children[children.length - 1] as { y: number; height: number }
+      const contentHeight = lastChild.y + lastChild.height
+      const scrollThreshold = Math.max(2, Math.floor(scroll.height * RESULT_PREFETCH_VIEWPORTS))
+      if (scroll.scrollTop + scroll.height >= contentHeight - scrollThreshold) {
+        debug.log("results:scroll-prefetch", {
+          scrollTop: scroll.scrollTop,
+          height: scroll.height,
+          contentHeight,
+          scrollThreshold,
+          rowsAhead: resultPrefetchState().rowsAhead,
+        })
+        scheduleResultPrefetch(false)
+      }
+    }, 200)
+    onCleanup(() => clearInterval(interval))
   })
 
   const estimatePreviewPartHeight = (part: ConversationPreviewPart) => {
@@ -1027,6 +1058,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                   >
                     <Show when={!loading()}>
                       <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerLabel()} theme={theme()} />}>
+                        <box height={resultTopSpacerHeight()} flexShrink={0} />
                         <For each={resultRenderWindow().items}>
                           {(item, index) => {
                             const absoluteIndex = () => resultRenderWindow().start + index()
@@ -1043,6 +1075,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                             )
                           }}
                         </For>
+                        <box height={resultBottomSpacerHeight()} flexShrink={0} />
                         <Show when={loadingMore()}>
                           <SkeletonRow theme={theme()} />
                         </Show>
