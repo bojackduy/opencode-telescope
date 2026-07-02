@@ -23,6 +23,7 @@ import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.
 import { findRenderableByID, jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
+  debug.log("component:render:start")
   type OwnerFilter = "all" | SearchRole
   const dimensions = useTerminalDimensions()
   const [query, setQuery] = createSignal("")
@@ -217,6 +218,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         }
         debug.timeEnd("query:recent")
         setLoading(false)
+        debug.log("component:interactive")
       }, 1)
       onCleanup(() => clearTimeout(timer))
       return

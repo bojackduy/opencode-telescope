@@ -631,10 +631,29 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
 
 function indexedRecentRows(db: Database, dbPath: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
   try {
-    const index = ensureSearchIndex(db, dbPath, { rebuild: false })
+    const index = ensureSearchIndex(db, dbPath, { rebuild: false, useStale: true })
     if (!index) {
-      scheduleBackgroundIndexRebuild(dbPath)
+      debug.log("query:recent:index:missing", { dbPath })
       return
+    }
+
+    const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_index").get()?.count ?? 0
+    if (rowCount === 0) {
+      debug.log("query:recent:index:empty", { dbPath })
+      return
+    }
+
+    const state = sourceState(db, dbPath)
+    const currentDataVersion = getMeta(index, "source_data_version")
+    const currentMtimeMs = getMeta(index, "source_mtime_ms")
+    const currentPath = getMeta(index, "source_path")
+    const currentIndexVersion = getMeta(index, "index_version")
+    if (currentPath !== dbPath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
+      debug.log("query:recent:index:stale", {
+        dbPath,
+        expectedDataVersion: state.dataVersion,
+        actualDataVersion: currentDataVersion,
+      })
     }
 
     const conditions: string[] = ["part_type = 'text'"]
@@ -711,7 +730,7 @@ function visibleTextRows(db: Database, limit: number, query?: string, directory?
   return rows
 }
 
-function ensureSearchIndex(source: Database, sourcePath: string, options?: { rebuild?: boolean }) {
+function ensureSearchIndex(source: Database, sourcePath: string, options?: { rebuild?: boolean; useStale?: boolean }) {
   const indexPath = searchIndexPath(sourcePath)
   if (!_indexDb || _indexDbPath !== indexPath) {
     _indexDb?.close()
@@ -726,7 +745,10 @@ function ensureSearchIndex(source: Database, sourcePath: string, options?: { reb
   const currentPath = getMeta(_indexDb, "source_path")
   const currentIndexVersion = getMeta(_indexDb, "index_version")
   if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
-    if (options?.rebuild === false) return
+    if (options?.rebuild === false) {
+      if (options?.useStale) return _indexDb
+      return
+    }
     rebuildSearchIndex(source, _indexDb, sourcePath, state)
   }
   return _indexDb
