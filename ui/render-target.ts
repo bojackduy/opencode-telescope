@@ -1,5 +1,6 @@
 import type { ScrollBoxRenderable } from "@opentui/core"
 import type { SearchResult } from "../search.ts"
+import { debug } from "./debug.ts"
 
 export function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
   return Math.max(1, Math.floor((scroll?.height || 10) / 8))
@@ -13,10 +14,35 @@ export function messageTargetID(item: SearchResult) {
 }
 
 export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
-  if (!scroll) return
+  if (!scroll) {
+    debug.log("preview:target-scroll:skip", { reason: "no-scroll", targetID })
+    return
+  }
   const target = findRenderableByID(scroll, targetID)
-  if (!target) return
-  scroll.scrollBy(target.y - scroll.y - Math.max(1, Math.floor(scroll.height / 3)))
+  if (!target) {
+    debug.log("preview:target-scroll:skip", {
+      reason: "target-not-found",
+      targetID,
+      y: scroll.y,
+      scrollTop: scroll.scrollTop,
+      scrollHeight: scroll.scrollHeight,
+      height: scroll.height,
+      children: scroll.getChildren().length,
+    })
+    return
+  }
+  const delta = target.y - scroll.y - Math.max(1, Math.floor(scroll.height / 3))
+  debug.log("preview:target-scroll", {
+    targetID,
+    targetY: target.y,
+    scrollY: scroll.y,
+    scrollTop: scroll.scrollTop,
+    scrollHeight: scroll.height,
+    contentHeight: scroll.scrollHeight,
+    delta,
+  })
+  scroll.scrollBy(delta)
+  debug.log("preview:target-scroll:after", { targetID, scrollY: scroll.y, scrollTop: scroll.scrollTop })
 }
 
 export function jumpToRenderedTarget(root: unknown, targetID: string) {

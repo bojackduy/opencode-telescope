@@ -432,18 +432,55 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   })
 
   const previewContentHeight = () => {
-    const children = previewScroll?.getChildren()
+    return previewScroll?.scrollHeight ?? 0
+  }
+
+  const previewScrollState = () => {
+    const scroll = previewScroll
+    const children = scroll?.getChildren()
     const lastChild = children?.[children.length - 1] as { y: number; height: number } | undefined
-    return lastChild ? lastChild.y + lastChild.height : 0
+    return {
+      y: scroll?.y,
+      height: scroll?.height,
+      scrollTop: scroll?.scrollTop,
+      scrollHeight: scroll?.scrollHeight,
+      childContentHeight: lastChild ? lastChild.y + lastChild.height : 0,
+      children: children?.length ?? 0,
+      hasMoreBefore: hasMorePreviewBefore(),
+      hasMoreAfter: hasMorePreviewAfter(),
+      loadingMore: loadingPreviewMore(),
+      prefetchingBefore: prefetchingPreviewBefore(),
+      prefetchingAfter: prefetchingPreviewAfter(),
+      timerBefore: Boolean(previewBeforeTimer),
+      timerAfter: Boolean(previewAfterTimer),
+    }
   }
 
   const loadPreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
     const item = selectedResult()
     const first = previewParts()[0]
-    if (!item || !first || loadingPreviewMore() || prefetchingPreviewBefore()) return
+    if (!item || !first || loadingPreviewMore() || prefetchingPreviewBefore()) {
+      debug.log("preview:load-before:skip", {
+        reason: !item ? "no-item" : !first ? "no-first-part" : loadingPreviewMore() ? "loading-preview-more" : "prefetching-before",
+        previousContentHeight,
+        preserveScroll,
+        visibleLoad,
+        state: previewScrollState(),
+      })
+      return
+    }
+    const beforeState = previewScrollState()
     visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewBefore(true)
     debug.time("preview:load-before")
     try {
+      debug.log("preview:load-before:start", {
+        item: item.id,
+        cursor: { id: first.id, timeCreated: first.timeCreated },
+        previousContentHeight,
+        preserveScroll,
+        visibleLoad,
+        state: beforeState,
+      })
       const page = loadConversationBefore(item, { id: first.id, timeCreated: first.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
       debug.log("preview:load-before", {
         item: item.id,
@@ -458,8 +495,25 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         setPreviewParts((prev) => [...page.parts, ...prev])
         if (preserveScroll) {
           setTimeout(() => {
+            const beforeAdjust = previewScrollState()
             const delta = previewContentHeight() - previousContentHeight
             if (delta > 0) previewScroll?.scrollBy(delta)
+            debug.log("preview:load-before:adjust", {
+              delta,
+              previousContentHeight,
+              newContentHeight: previewContentHeight(),
+              scrolled: delta > 0,
+              beforeAdjust,
+              afterAdjust: previewScrollState(),
+            })
+          }, 1)
+        } else {
+          setTimeout(() => {
+            debug.log("preview:load-before:no-adjust", {
+              previousContentHeight,
+              newContentHeight: previewContentHeight(),
+              state: previewScrollState(),
+            })
           }, 1)
         }
       }
@@ -475,7 +529,20 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const loadPreviewAfter = (visibleLoad = false) => {
     const item = selectedResult()
     const last = previewParts().at(-1)
-    if (!item || !last || loadingPreviewMore() || prefetchingPreviewAfter()) return
+    if (!item || !last || loadingPreviewMore() || prefetchingPreviewAfter()) {
+      debug.log("preview:load-after:skip", {
+        reason: !item ? "no-item" : !last ? "no-last-part" : loadingPreviewMore() ? "loading-preview-more" : "prefetching-after",
+        visibleLoad,
+        state: previewScrollState(),
+      })
+      return
+    }
+    debug.log("preview:load-after:start", {
+      item: item.id,
+      cursor: { id: last.id, timeCreated: last.timeCreated },
+      visibleLoad,
+      state: previewScrollState(),
+    })
     visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewAfter(true)
     debug.time("preview:load-after")
     try {
@@ -499,16 +566,40 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   }
 
   const schedulePreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
-    if (!hasMorePreviewBefore() || loadingPreviewMore() || prefetchingPreviewBefore()) return
+    if (!hasMorePreviewBefore() || loadingPreviewMore() || prefetchingPreviewBefore()) {
+      debug.log("preview:prefetch-before:skip", {
+        reason: !hasMorePreviewBefore() ? "no-more-before" : loadingPreviewMore() ? "loading-preview-more" : "prefetching-before",
+        previousContentHeight,
+        preserveScroll,
+        visibleLoad,
+        state: previewScrollState(),
+      })
+      return
+    }
     if (previewBeforeTimer) {
       if (pendingPreviewBefore) {
+        const previousPending = { ...pendingPreviewBefore }
         pendingPreviewBefore.preserveScroll = pendingPreviewBefore.preserveScroll && preserveScroll
         pendingPreviewBefore.visibleLoad = pendingPreviewBefore.visibleLoad || visibleLoad
+        debug.log("preview:prefetch-before:merge", {
+          previousPending,
+          nextPending: pendingPreviewBefore,
+          requested: { previousContentHeight, preserveScroll, visibleLoad },
+          state: previewScrollState(),
+        })
+      } else {
+        debug.log("preview:prefetch-before:skip", {
+          reason: "timer-already-set",
+          previousContentHeight,
+          preserveScroll,
+          visibleLoad,
+          state: previewScrollState(),
+        })
       }
       return
     }
     pendingPreviewBefore = { previousContentHeight, preserveScroll, visibleLoad }
-    debug.log("preview:prefetch-before-scheduled", { preserveScroll, visibleLoad })
+    debug.log("preview:prefetch-before-scheduled", { previousContentHeight, preserveScroll, visibleLoad, state: previewScrollState() })
     previewBeforeTimer = setTimeout(() => {
       const pending = pendingPreviewBefore
       previewBeforeTimer = undefined
@@ -518,10 +609,20 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   }
 
   const schedulePreviewAfter = (visibleLoad = false) => {
-    if (!hasMorePreviewAfter() || loadingPreviewMore() || prefetchingPreviewAfter()) return
+    if (!hasMorePreviewAfter() || loadingPreviewMore() || prefetchingPreviewAfter()) {
+      debug.log("preview:prefetch-after:skip", {
+        reason: !hasMorePreviewAfter() ? "no-more-after" : loadingPreviewMore() ? "loading-preview-more" : "prefetching-after",
+        visibleLoad,
+        state: previewScrollState(),
+      })
+      return
+    }
     pendingPreviewAfterVisible = pendingPreviewAfterVisible || visibleLoad
-    if (previewAfterTimer) return
-    debug.log("preview:prefetch-after-scheduled", { visibleLoad })
+    if (previewAfterTimer) {
+      debug.log("preview:prefetch-after:skip", { reason: "timer-already-set", visibleLoad, pendingVisibleLoad: pendingPreviewAfterVisible, state: previewScrollState() })
+      return
+    }
+    debug.log("preview:prefetch-after-scheduled", { visibleLoad, state: previewScrollState() })
     previewAfterTimer = setTimeout(() => {
       const pendingVisibleLoad = pendingPreviewAfterVisible
       previewAfterTimer = undefined
@@ -573,18 +674,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       const scroll = previewScroll
       const children = scroll?.getChildren()
       if (!scroll || !children || children.length === 0) return
-      const lastChild = children[children.length - 1] as { y: number; height: number }
-      const totalContentHeight = lastChild.y + lastChild.height
-      const atTop = scroll.y <= 0
+      const totalContentHeight = scroll.scrollHeight
+      const atTop = scroll.scrollTop <= 0
       const prefetchDistance = Math.max(2, Math.floor(scroll.height * PREVIEW_PREFETCH_VIEWPORTS))
-      const nearTop = scroll.y <= prefetchDistance
-      const atBottom = scroll.y + scroll.height >= totalContentHeight - 1
-      const nearBottom = scroll.y + scroll.height >= totalContentHeight - prefetchDistance
+      const nearTop = scroll.scrollTop <= prefetchDistance
+      const atBottom = scroll.scrollTop + scroll.height >= totalContentHeight - 1
+      const nearBottom = scroll.scrollTop + scroll.height >= totalContentHeight - prefetchDistance
       if (nearTop || nearBottom) {
         debug.log("preview:scroll-edge", {
           y: scroll.y,
+          scrollTop: scroll.scrollTop,
           height: scroll.height,
           contentHeight: totalContentHeight,
+          childContentHeight: previewScrollState().childContentHeight,
           prefetchDistance,
           atTop,
           nearTop,
@@ -626,22 +728,30 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const scrollPreview = (direction: 1 | -1, evt: ParsedKey) => {
     prevent(evt)
     const scroll = previewScroll
-    if (!scroll) return
+    if (!scroll) {
+      debug.log("preview:scroll-key:skip", { reason: "no-scroll", direction })
+      return
+    }
 
-    if (direction < 0 && scroll.y <= 0 && hasMorePreviewBefore()) {
+    const beforeState = previewScrollState()
+    debug.log("preview:scroll-key", { direction, state: beforeState })
+
+    if (direction < 0 && scroll.scrollTop <= 0 && hasMorePreviewBefore()) {
+      debug.log("preview:scroll-key:load-before", { direction, state: beforeState })
       schedulePreviewBefore(previewContentHeight(), false, true)
       return
     }
 
-    const children = scroll.getChildren()
-    const lastChild = children[children.length - 1] as { y: number; height: number } | undefined
-    const totalContentHeight = lastChild ? lastChild.y + lastChild.height : 0
-    if (direction > 0 && scroll.y + scroll.height >= totalContentHeight - 1 && hasMorePreviewAfter()) {
+    const totalContentHeight = scroll.scrollHeight
+    if (direction > 0 && scroll.scrollTop + scroll.height >= totalContentHeight - 1 && hasMorePreviewAfter()) {
+      debug.log("preview:scroll-key:load-after", { direction, totalContentHeight, state: beforeState })
       schedulePreviewAfter(true)
       return
     }
 
-    scroll.scrollBy(direction * previewScrollAmount(scroll))
+    const amount = direction * previewScrollAmount(scroll)
+    scroll.scrollBy(amount)
+    debug.log("preview:scroll-key:scroll", { direction, amount, before: beforeState, after: previewScrollState() })
   }
 
   const focusInput = () => {

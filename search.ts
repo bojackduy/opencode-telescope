@@ -231,7 +231,11 @@ export function loadConversationAround(result: SearchResult, options?: { before?
     fetchBefore,
     fetchAfter,
     beforeRows: beforeRows.length,
+    validBefore: validBefore.length,
+    invalidBefore: previewRowBreakdown(beforeRows, validBefore),
     afterRows: afterRows.length,
+    validAfter: validAfter.length,
+    invalidAfter: previewRowBreakdown(afterRows, validAfter),
     parts: parts.length,
     hasMoreBefore: page.hasMoreBefore,
     hasMoreAfter: page.hasMoreAfter,
@@ -262,6 +266,7 @@ export function loadConversationBefore(result: SearchResult, cursor: Conversatio
   `).all(result.sessionID, cursor.timeCreated, cursor.timeCreated, cursor.id, fetchLimit)
   const valid = rows.filter(isPreviewRow)
   const parts = valid.slice(0, limit).reverse().flatMap((row) => parseConversationPart(row, false) ?? [])
+  const parsedIds = new Set(parts.map((part) => part.id))
   const page = { parts, hasMoreBefore: valid.length > limit }
   debug.log("preview:window", {
     item: result.id,
@@ -270,7 +275,10 @@ export function loadConversationBefore(result: SearchResult, cursor: Conversatio
     cursor,
     limit,
     rows: rows.length,
+    valid: valid.length,
+    invalid: previewRowBreakdown(rows, valid),
     parts: parts.length,
+    unparsedValid: valid.slice(0, limit).filter((row) => !parsedIds.has(row.id)).map((row) => ({ id: row.id, type: row.type, role: row.role })),
     hasMoreBefore: page.hasMoreBefore,
     first: parts[0]?.id,
     last: parts.at(-1)?.id,
@@ -298,6 +306,7 @@ export function loadConversationAfter(result: SearchResult, cursor: Conversation
   `).all(result.sessionID, cursor.timeCreated, cursor.timeCreated, cursor.id, fetchLimit)
   const valid = rows.filter(isPreviewRow)
   const parts = valid.slice(0, limit).flatMap((row) => parseConversationPart(row, false) ?? [])
+  const parsedIds = new Set(parts.map((part) => part.id))
   const page = { parts, hasMoreAfter: valid.length > limit }
   debug.log("preview:window", {
     item: result.id,
@@ -306,7 +315,10 @@ export function loadConversationAfter(result: SearchResult, cursor: Conversation
     cursor,
     limit,
     rows: rows.length,
+    valid: valid.length,
+    invalid: previewRowBreakdown(rows, valid),
     parts: parts.length,
+    unparsedValid: valid.slice(0, limit).filter((row) => !parsedIds.has(row.id)).map((row) => ({ id: row.id, type: row.type, role: row.role })),
     hasMoreAfter: page.hasMoreAfter,
     first: parts[0]?.id,
     last: parts.at(-1)?.id,
@@ -524,6 +536,21 @@ function parseConversationPart(row: ConversationRow, target: boolean): Conversat
 function isPreviewRow(row: ConversationRow) {
   return (row.role === "user" || row.role === "assistant") &&
     (row.type === "text" || row.type === "reasoning" || row.type === "tool")
+}
+
+function previewRowBreakdown(rows: ConversationRow[], validRows: ConversationRow[]) {
+  const valid = new Set(validRows.map((row) => row.id))
+  const invalidRows = rows.filter((row) => !valid.has(row.id))
+  if (invalidRows.length === 0) return undefined
+  const byRole = countBy(invalidRows, (row) => String(row.role ?? "unknown"))
+  const byType = countBy(invalidRows, (row) => String(row.type ?? "unknown"))
+  return { count: invalidRows.length, byRole, byType }
+}
+
+function countBy<T>(items: T[], key: (item: T) => string) {
+  const counts: Record<string, number> = {}
+  for (const item of items) counts[key(item)] = (counts[key(item)] ?? 0) + 1
+  return counts
 }
 
 function parsePartData(data: string) {
