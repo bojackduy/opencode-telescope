@@ -51,7 +51,9 @@ export const ConversationPreview = (props: { item: SearchResult; parts: Conversa
     <Show when={props.parts.length > 0} fallback={<ConversationFallback item={props.item} syntax={props.syntax} theme={props.theme} />}>
       <For each={props.parts}>
         {(part) => (
-          <PreviewConversationPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
+          <box id={`preview-part-${part.id}`} flexDirection="column" flexShrink={0}>
+            <PreviewConversationPart part={part} item={props.item} syntax={props.syntax} theme={props.theme} />
+          </box>
         )}
       </For>
     </Show>

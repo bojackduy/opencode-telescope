@@ -20,7 +20,7 @@ import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
-import { jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { findRenderableByID, jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
   type OwnerFilter = "all" | SearchRole
@@ -46,6 +46,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [loadingPreviewMore, setLoadingPreviewMore] = createSignal(false)
   const [prefetchingPreviewBefore, setPrefetchingPreviewBefore] = createSignal(false)
   const [prefetchingPreviewAfter, setPrefetchingPreviewAfter] = createSignal(false)
+  const [previewWindow, setPreviewWindow] = createSignal({ start: 0, end: 0 })
+  const [previewHeightVersion, setPreviewHeightVersion] = createSignal(0)
   const MIN_SEARCH_BATCH_SIZE = 25
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
@@ -93,6 +95,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewAfterTimer: ReturnType<typeof setTimeout> | undefined
   let pendingPreviewBefore: { previousContentHeight: number; preserveScroll: boolean; visibleLoad: boolean } | undefined
   let pendingPreviewAfterVisible = false
+  const previewMeasuredHeights = new Map<string, number>()
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
     if (previewAfterTimer) clearTimeout(previewAfterTimer)
@@ -431,9 +434,75 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     onCleanup(() => clearTimeout(timer))
   })
 
-  const previewContentHeight = () => {
-    return previewScroll?.scrollHeight ?? 0
+  const estimatePreviewPartHeight = (part: ConversationPreviewPart) => {
+    if (part.type === "tool") {
+      if (!part.target) return 2
+      if (part.tool === "write") return 40
+      if (part.tool === "edit" || part.tool === "apply_patch") return 35
+      return 2
+    }
+    if (part.type === "reasoning") return Math.min(24, Math.max(2, Math.ceil(part.text.length / 120)))
+    return Math.min(90, Math.max(3, Math.ceil(part.text.length / 90)))
   }
+
+  const previewPartHeight = (part: ConversationPreviewPart) => previewMeasuredHeights.get(part.id) ?? estimatePreviewPartHeight(part)
+
+  const previewVirtualLayout = createMemo(() => {
+    previewHeightVersion()
+    let offset = 0
+    return previewParts().map((part) => {
+      const height = previewPartHeight(part)
+      const row = { part, top: offset, bottom: offset + height, height }
+      offset += height
+      return row
+    })
+  })
+
+  const previewContentHeight = () => previewVirtualLayout().at(-1)?.bottom ?? 0
+
+  const updatePreviewWindow = () => {
+    const scroll = previewScroll
+    const layout = previewVirtualLayout()
+    if (layout.length === 0) {
+      setPreviewWindow({ start: 0, end: 0 })
+      return
+    }
+    if (!scroll) {
+      const next = { start: 0, end: Math.min(layout.length, 20) }
+      const current = previewWindow()
+      if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
+      return
+    }
+
+    const overscan = Math.max(scroll.height * 2, 40)
+    const from = Math.max(0, scroll.scrollTop - overscan)
+    const to = scroll.scrollTop + scroll.height + overscan
+    const foundStart = layout.findIndex((row) => row.bottom >= from)
+    const start = foundStart === -1 ? Math.max(0, layout.length - 1) : Math.max(0, foundStart)
+    const foundEnd = layout.findIndex((row) => row.top > to)
+    const end = foundEnd === -1 ? layout.length : foundEnd
+    const next = { start, end: Math.min(layout.length, Math.max(start + 1, end)) }
+    const current = previewWindow()
+    if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
+  }
+
+  const previewWindowParts = createMemo(() => {
+    const { start, end } = previewWindow()
+    return previewParts().slice(start, end)
+  })
+
+  const previewTopSpacerHeight = createMemo(() => {
+    const { start } = previewWindow()
+    return previewVirtualLayout()[start]?.top ?? 0
+  })
+
+  const previewBottomSpacerHeight = createMemo(() => {
+    const { end } = previewWindow()
+    const layout = previewVirtualLayout()
+    const total = layout.at(-1)?.bottom ?? 0
+    const renderedBottom = end > 0 ? layout[end - 1]?.bottom ?? 0 : 0
+    return Math.max(0, total - renderedBottom)
+  })
 
   const previewScrollState = () => {
     const scroll = previewScroll
@@ -455,6 +524,45 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       timerAfter: Boolean(previewAfterTimer),
     }
   }
+
+  const measurePreviewWindow = () => {
+    const scroll = previewScroll
+    if (!scroll) return
+
+    let changed = false
+    for (const part of previewWindowParts()) {
+      const node = findRenderableByID(scroll, `preview-part-${part.id}`)
+      const height = node?.height
+      if (!height || height <= 0) continue
+      if (previewMeasuredHeights.get(part.id) !== height) {
+        previewMeasuredHeights.set(part.id, height)
+        changed = true
+      }
+    }
+
+    if (changed) {
+      debug.log("preview:measure", {
+        measured: previewWindowParts().length,
+        totalMeasured: previewMeasuredHeights.size,
+        window: previewWindow(),
+      })
+      setPreviewHeightVersion((value) => value + 1)
+      setTimeout(updatePreviewWindow, 1)
+    }
+  }
+
+  createEffect(() => {
+    previewParts()
+    previewHeightVersion()
+    const timer = setTimeout(updatePreviewWindow, 1)
+    onCleanup(() => clearTimeout(timer))
+  })
+
+  createEffect(() => {
+    previewWindowParts()
+    const timer = setTimeout(measurePreviewWindow, 1)
+    onCleanup(() => clearTimeout(timer))
+  })
 
   const loadPreviewBefore = (previousContentHeight = previewContentHeight(), preserveScroll = true, visibleLoad = false) => {
     const item = selectedResult()
@@ -498,6 +606,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             const beforeAdjust = previewScrollState()
             const delta = previewContentHeight() - previousContentHeight
             if (delta > 0) previewScroll?.scrollBy(delta)
+            updatePreviewWindow()
             debug.log("preview:load-before:adjust", {
               delta,
               previousContentHeight,
@@ -509,6 +618,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           }, 1)
         } else {
           setTimeout(() => {
+            updatePreviewWindow()
             debug.log("preview:load-before:no-adjust", {
               previousContentHeight,
               newContentHeight: previewContentHeight(),
@@ -555,7 +665,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         first: page.parts[0]?.id,
         last: page.parts.at(-1)?.id,
       })
-      if (page.parts.length > 0) setPreviewParts((prev) => [...prev, ...page.parts])
+      if (page.parts.length > 0) {
+        setPreviewParts((prev) => [...prev, ...page.parts])
+        setTimeout(updatePreviewWindow, 1)
+      }
       setHasMorePreviewAfter(page.hasMoreAfter)
     } catch (err) {
       debug.log("preview:load-after:error", err instanceof Error ? err.message : String(err))
@@ -631,12 +744,32 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }, 1)
   }
 
+  const scrollPreviewToEstimatedTarget = (item: SearchResult) => {
+    const scroll = previewScroll
+    if (!scroll) return
+    const targetID = messageTargetID(item)
+    const row = previewVirtualLayout().find((entry) => entry.part.id === item.id)
+    if (!row) {
+      scrollPreviewToTarget(scroll, targetID)
+      return
+    }
+
+    const top = Math.max(0, row.top - Math.max(1, Math.floor(scroll.height / 3)))
+    debug.log("preview:target-scroll:estimated", { targetID, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: previewWindow() })
+    scroll.scrollTo(top)
+    updatePreviewWindow()
+    setTimeout(() => scrollPreviewToTarget(scroll, targetID), 1)
+  }
+
   let lastPreviewItemId = ""
   createEffect(() => {
     const item = selectedResult()
     if (!item) {
       cancelPreviewPrefetch()
       setPreviewParts([])
+      previewMeasuredHeights.clear()
+      setPreviewHeightVersion((value) => value + 1)
+      setPreviewWindow({ start: 0, end: 0 })
       setHasMorePreviewBefore(false)
       setHasMorePreviewAfter(false)
       return
@@ -644,6 +777,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (item.id === lastPreviewItemId) return
     lastPreviewItemId = item.id
     cancelPreviewPrefetch()
+    previewMeasuredHeights.clear()
+    setPreviewHeightVersion((value) => value + 1)
+    setPreviewWindow({ start: 0, end: 0 })
     debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
     debug.time("preview:load")
@@ -661,6 +797,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       setPreviewParts(page.parts)
       setHasMorePreviewBefore(page.hasMoreBefore)
       setHasMorePreviewAfter(page.hasMoreAfter)
+      setTimeout(() => scrollPreviewToEstimatedTarget(item), 1)
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
@@ -674,7 +811,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       const scroll = previewScroll
       const children = scroll?.getChildren()
       if (!scroll || !children || children.length === 0) return
-      const totalContentHeight = scroll.scrollHeight
+      const totalContentHeight = previewContentHeight()
       const atTop = scroll.scrollTop <= 0
       const prefetchDistance = Math.max(2, Math.floor(scroll.height * PREVIEW_PREFETCH_VIEWPORTS))
       const nearTop = scroll.scrollTop <= prefetchDistance
@@ -708,11 +845,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let scrolledItem = ""
   createEffect(() => {
     const item = selectedResult()
-    previewParts()
+    previewVirtualLayout()
     if (!item) return
     if (item.id === scrolledItem) return
     scrolledItem = item.id
-    const timer = setTimeout(() => scrollPreviewToTarget(previewScroll, messageTargetID(item)), 1)
+    const timer = setTimeout(() => scrollPreviewToEstimatedTarget(item), 1)
     onCleanup(() => clearTimeout(timer))
   })
 
@@ -742,7 +879,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       return
     }
 
-    const totalContentHeight = scroll.scrollHeight
+    const totalContentHeight = previewContentHeight()
     if (direction > 0 && scroll.scrollTop + scroll.height >= totalContentHeight - 1 && hasMorePreviewAfter()) {
       debug.log("preview:scroll-key:load-after", { direction, totalContentHeight, state: beforeState })
       schedulePreviewAfter(true)
@@ -751,6 +888,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     const amount = direction * previewScrollAmount(scroll)
     scroll.scrollBy(amount)
+    updatePreviewWindow()
     debug.log("preview:scroll-key:scroll", { direction, amount, before: beforeState, after: previewScrollState() })
   }
 
@@ -919,7 +1057,13 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                 <PreviewHeader item={selectedResult()} query={query()} theme={theme()} />
                 <scrollbox ref={(element: ScrollBoxRenderable) => (previewScroll = element)} flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1} verticalScrollbarOptions={{ visible: true }}>
                   <Show when={selectedResult()} fallback={<text fg={theme().textMuted}>Select a hit to preview the exact matched message.</text>}>
-                    {(item) => <ConversationPreview item={item()} parts={previewParts()} syntax={syntax()} theme={theme()} />}
+                    {(item) => (
+                      <box flexDirection="column" flexShrink={0}>
+                        <box height={previewTopSpacerHeight()} flexShrink={0} />
+                        <ConversationPreview item={item()} parts={previewWindowParts()} syntax={syntax()} theme={theme()} />
+                        <box height={previewBottomSpacerHeight()} flexShrink={0} />
+                      </box>
+                    )}
                   </Show>
                 </scrollbox>
               </box>

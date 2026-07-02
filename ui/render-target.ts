@@ -59,9 +59,10 @@ export function jumpToRenderedTarget(root: unknown, targetID: string) {
   setTimeout(tick, 50)
 }
 
-type RenderNode = {
+export type RenderNode = {
   id?: string
   y: number
+  height?: number
   getChildren(): unknown[]
 }
 
@@ -94,7 +95,7 @@ function isScrollNode(value: RenderNode): value is ScrollNode {
   return "scrollBy" in value && typeof value.scrollBy === "function"
 }
 
-function findRenderableByID(node: unknown, targetID: string): RenderNode | undefined {
+export function findRenderableByID(node: unknown, targetID: string): RenderNode | undefined {
   if (!isRenderNode(node)) return
   if (node.id === targetID) return node
   for (const child of node.getChildren()) {
