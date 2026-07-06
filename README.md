@@ -1,8 +1,17 @@
 # opencode-telescope
 
-Fuzzy search across all your OpenCode conversations — grep through session and chat history, find code snippets, and jump to any chat instantly.
+OpenCode TUI plugin for fuzzy-searching local conversation history, session transcripts, and past AI coding chats.
+
+Install the npm package `@bojackduy/opencode-telescope` to grep through OpenCode chat history, find old code snippets, and jump back to any session instantly.
 
 > Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
+
+## Links
+
+- Documentation: https://bojackduy.github.io/opencode-telescope/
+- npm: https://www.npmjs.com/package/@bojackduy/opencode-telescope
+- GitHub: https://github.com/bojackduy/opencode-telescope
+- Issues: https://github.com/bojackduy/opencode-telescope/issues
 
 ![Demo](./assets/demo.png)
 
@@ -19,8 +28,11 @@ Fuzzy search across all your OpenCode conversations — grep through session and
 - **Live preview** — preview the matched conversation result before opening
 - **Find & jump** — select any result and jump straight to that session
 - **Neovim Telescope-style UX** — familiar `<leader>f` keybind and `/telescope` command
+- **Local-first search** — reads your OpenCode session database without sending chat history to a remote service
 
 ## Installation
+
+Install from npm as `@bojackduy/opencode-telescope`.
 
 Add the plugin to your `tui.json`:
 
@@ -87,5 +99,9 @@ Key strings support simple names like `j`, `k`, `down`, `up`, `enter`, `return`,
 ## How it works
 
 Reads the OpenCode local SQLite session database in read-only mode, parses conversations into searchable text, and opens the selected session through the existing TUI route.
+
+## Keywords
+
+OpenCode plugin, OpenCode TUI, fuzzy finder, conversation search, chat history search, AI coding session search, LLM history, local session search, Telescope-style picker.
 
 ![Demo animation](./assets/demo.gif)

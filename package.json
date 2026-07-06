@@ -2,16 +2,16 @@
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-telescope",
   "version": "0.1.21",
-  "description": "Fuzzy search across all OpenCode conversations — grep session and chat history, find code snippets, and jump to any chat instantly",
+  "description": "OpenCode TUI plugin for fuzzy-searching local conversation history, session transcripts, and past AI coding chats",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Duyyy123/opencode-telescope.git"
+    "url": "git+https://github.com/bojackduy/opencode-telescope.git"
   },
-  "homepage": "https://github.com/Duyyy123/opencode-telescope#readme",
+  "homepage": "https://bojackduy.github.io/opencode-telescope/",
   "bugs": {
-    "url": "https://github.com/Duyyy123/opencode-telescope/issues"
+    "url": "https://github.com/bojackduy/opencode-telescope/issues"
   },
   "keywords": [
     "opencode",
@@ -21,11 +21,15 @@
     "search",
     "session",
     "conversation",
+    "conversation-search",
     "history",
+    "ai-chat-history",
+    "llm-history",
     "fuzzy",
     "fuzzy-finder",
     "grep",
     "finder",
+    "opencode-tui",
     "neovim",
     "chat-history"
   ],

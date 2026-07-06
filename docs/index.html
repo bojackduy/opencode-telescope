@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>opencode-telescope - Fuzzy Search for OpenCode Chat History</title>
+    <meta
+      name="description"
+      content="opencode-telescope is an OpenCode TUI plugin for fuzzy-searching local conversation history, session transcripts, AI coding chats, and old code snippets."
+    />
+    <meta
+      name="keywords"
+      content="OpenCode, OpenCode plugin, OpenCode TUI, fuzzy search, conversation search, chat history search, AI coding session search, LLM history, telescope"
+    />
+    <link rel="canonical" href="https://bojackduy.github.io/opencode-telescope/" />
+    <meta property="og:title" content="opencode-telescope" />
+    <meta
+      property="og:description"
+      content="Fuzzy-search local OpenCode conversations, session transcripts, and past AI coding chats from the TUI."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bojackduy.github.io/opencode-telescope/" />
+    <meta name="twitter:card" content="summary" />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090b10;
+        --panel: #111722;
+        --text: #eaf0ff;
+        --muted: #a8b3cf;
+        --accent: #8bd5ff;
+        --accent-2: #c6a0ff;
+        --border: #283247;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at top left, rgba(139, 213, 255, 0.18), transparent 30rem),
+          radial-gradient(circle at bottom right, rgba(198, 160, 255, 0.14), transparent 28rem),
+          var(--bg);
+        color: var(--text);
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.6;
+      }
+
+      main {
+        width: min(72rem, calc(100% - 2rem));
+        margin: 0 auto;
+        padding: 4rem 0;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(18rem, 0.8fr);
+        gap: 2rem;
+        align-items: center;
+      }
+
+      .eyebrow {
+        color: var(--accent);
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0.5rem 0 1rem;
+        font-size: clamp(2.6rem, 8vw, 5.8rem);
+        line-height: 0.92;
+        letter-spacing: -0.07em;
+      }
+
+      h2 {
+        margin-top: 0;
+        font-size: 1.35rem;
+      }
+
+      p {
+        color: var(--muted);
+        font-size: 1.08rem;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 1.5rem;
+      }
+
+      .button {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--text);
+        display: inline-flex;
+        font-weight: 700;
+        padding: 0.8rem 1rem;
+        text-decoration: none;
+      }
+
+      .button.primary {
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #07101a;
+      }
+
+      .card,
+      pre {
+        background: rgba(17, 23, 34, 0.86);
+        border: 1px solid var(--border);
+        border-radius: 1.25rem;
+        box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.28);
+      }
+
+      .card {
+        padding: 1.25rem;
+      }
+
+      pre {
+        color: #d9e7ff;
+        overflow-x: auto;
+        padding: 1rem;
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1rem;
+        margin-top: 2rem;
+      }
+
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-top: 2rem;
+      }
+
+      @media (max-width: 760px) {
+        main {
+          padding: 2.5rem 0;
+        }
+
+        .hero,
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">OpenCode TUI plugin</div>
+          <h1>Find the chat where it happened.</h1>
+          <p>
+            <strong>opencode-telescope</strong> adds a Telescope-style fuzzy finder
+            to OpenCode so you can search local conversation history, session
+            transcripts, AI coding chats, and old code snippets from the terminal.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="https://www.npmjs.com/package/@bojackduy/opencode-telescope">Install from npm</a>
+            <a class="button" href="https://github.com/bojackduy/opencode-telescope">View on GitHub</a>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Package</h2>
+          <pre><code>@bojackduy/opencode-telescope</code></pre>
+          <p>
+            Search OpenCode sessions by keyword, preview matches, and jump back
+            into the exact conversation without leaving the TUI.
+          </p>
+        </div>
+      </section>
+
+      <section class="grid" aria-label="Features">
+        <div class="card">
+          <h2>Fuzzy search</h2>
+          <p>Grep across local OpenCode session messages and quickly narrow results.</p>
+        </div>
+        <div class="card">
+          <h2>Live preview</h2>
+          <p>Preview the matching conversation before opening the selected session.</p>
+        </div>
+        <div class="card">
+          <h2>Local first</h2>
+          <p>Reads the local OpenCode SQLite session database in read-only mode.</p>
+        </div>
+      </section>
+
+      <section style="margin-top: 2rem">
+        <h2>Install</h2>
+        <pre><code>{
+  "plugin": ["@bojackduy/opencode-telescope"]
+}</code></pre>
+        <p>
+          Open search with <code>&lt;leader&gt;f</code> or <code>/telescope</code>, type
+          to filter conversation text, then press <code>Enter</code> to jump to the
+          selected OpenCode session.
+        </p>
+      </section>
+
+      <nav class="links" aria-label="Project links">
+        <a href="https://github.com/bojackduy/opencode-telescope">GitHub repository</a>
+        <a href="https://www.npmjs.com/package/@bojackduy/opencode-telescope">npm package</a>
+        <a href="https://github.com/bojackduy/opencode-telescope/issues">Issues</a>
+        <a href="https://bojackduy.github.io/opencode-telescope/sitemap.xml">Sitemap</a>
+      </nav>
+    </main>
+  </body>
+</html>

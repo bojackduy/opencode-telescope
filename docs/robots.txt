@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://bojackduy.github.io/opencode-telescope/sitemap.xml
