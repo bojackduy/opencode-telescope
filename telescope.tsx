@@ -93,6 +93,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultNavigationStarted = false
   let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
+  let searchTimer: ReturnType<typeof setTimeout> | undefined
+  let lastFiredQuery = ""
+  const SEARCH_DEBOUNCE_MS = 200
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
     id: number
@@ -193,6 +196,51 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     })
   })
 
+  const executeSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
+    lastFiredQuery = q
+    const limit = q ? Math.min(searchBatchSize(), 80) : recentBatchSize()
+    setLoading(true)
+    if (q) setBusy(true)
+    debug.time("query:search")
+    try {
+      debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)" })
+      const batch = q
+        ? searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir, role })
+        : recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
+      debug.log("bootstrap:search:done", { rows: batch.length, limit })
+      solidBatch(() => {
+        setResults(batch)
+        setResultBaseOffset(0)
+        setNextResultOffset(batch.length)
+        setHasMore(batch.length >= limit)
+        setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
+        setSelected(0)
+      })
+    } catch (err) {
+      debug.log("bootstrap:search:error", err instanceof Error ? err.message : String(err))
+      solidBatch(() => {
+        setResults([])
+        setResultBaseOffset(0)
+        setNextResultOffset(0)
+        setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
+      })
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      debug.timeEnd("query:search")
+      setBusy(false)
+      setLoading(false)
+    }
+  }
+
+  const scheduleSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
+    if (searchTimer) clearTimeout(searchTimer)
+    if (q === lastFiredQuery && results().length > 0) return
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined
+      executeSearch(q, role, db, dir)
+    }, q ? SEARCH_DEBOUNCE_MS : 1)
+  }
+
   createEffect(() => {
     const q = query().trim()
     const role = ownerRole()
@@ -211,73 +259,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const db = dbPath()
     const dir = directory
 
-    if (!q) {
-      setLoading(true)
-      const limit = recentBatchSize()
-      const timer = setTimeout(() => {
-        debug.log("bootstrap:recent:start", { limit, directory: dir, role })
-        debug.time("query:recent")
-        try {
-          const batch = recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
-          debug.log("bootstrap:recent:done", { rows: batch.length, limit })
-          solidBatch(() => {
-            setResults(batch)
-            setResultBaseOffset(0)
-            setNextResultOffset(batch.length)
-            setHasMore(batch.length >= limit)
-            setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-            setSelected(0)
-          })
-        } catch (err) {
-          debug.log("bootstrap:recent:error", err instanceof Error ? err.message : String(err))
-          solidBatch(() => {
-            setResults([])
-            setResultBaseOffset(0)
-            setNextResultOffset(0)
-            setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
-          })
-          setError(err instanceof Error ? err.message : String(err))
-        }
-        debug.timeEnd("query:recent")
-        setLoading(false)
-        debug.log("component:interactive")
-      }, 1)
-      onCleanup(() => clearTimeout(timer))
-      return
-    }
-
-    setLoading(true)
-    setBusy(true)
-    const limit = searchBatchSize()
-    const timer = setTimeout(() => {
-      debug.time("query:search")
-      try {
-        debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q })
-        const batch = searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir, role })
-        debug.log("bootstrap:search:done", { rows: batch.length, limit })
-        solidBatch(() => {
-          setResults(batch)
-          setResultBaseOffset(0)
-          setNextResultOffset(batch.length)
-          setHasMore(batch.length >= limit)
-          setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-          setSelected(0)
-        })
-      } catch (err) {
-        solidBatch(() => {
-          setResults([])
-          setResultBaseOffset(0)
-          setNextResultOffset(0)
-          setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
-        })
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        debug.timeEnd("query:search")
-        setBusy(false)
-        setLoading(false)
-      }
-    }, 180)
-    onCleanup(() => clearTimeout(timer))
+    scheduleSearch(q, role, db, dir)
+    onCleanup(() => {
+      if (searchTimer) clearTimeout(searchTimer)
+      searchTimer = undefined
+    })
   })
 
   const loadMoreResults = (advance = false) => {
@@ -971,7 +957,24 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     debug.log("preview:target-scroll:estimated", { targetID, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: previewWindow() })
     scroll.scrollTo(top)
     updatePreviewWindow()
-    setTimeout(() => scrollPreviewToTarget(scroll, targetID), 1)
+    const scrollTopBeforeReal = scroll.scrollTop
+    setTimeout(() => {
+      scrollPreviewToTarget(scroll, targetID)
+      const now = Date.now()
+      const adjustmentMs = lastPreviewScrollKeyMs
+      if (adjustmentMs > 0 && now - adjustmentMs > 300) {
+        const targetTopReal = row.top
+        const expectedScrollTop = Math.max(0, targetTopReal - Math.max(1, Math.floor(scroll.height / 3)))
+        const drift = scroll.scrollTop - expectedScrollTop
+        if (Math.abs(drift) >= 2) {
+          const correctedScrollTop = scroll.scrollTop - drift
+          const correctedWindow = previewWindowForLayout(previewVirtualLayout(), correctedScrollTop, scroll.height)
+          setPreviewWindow(correctedWindow)
+          scroll.scrollTo(correctedScrollTop)
+          debug.log("preview:target-scroll:real-correct", { targetID, drift, scrollTopAfterReal: scroll.scrollTop, correctedScrollTop, window: correctedWindow })
+        }
+      }
+    }, 1)
   }
 
   let lastPreviewItemId = ""
