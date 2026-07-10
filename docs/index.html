@@ -20,7 +20,15 @@
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://bojackduy.github.io/opencode-telescope/" />
-    <meta name="twitter:card" content="summary" />
+    <meta
+      property="og:image"
+      content="https://raw.githubusercontent.com/bojackduy/opencode-telescope/main/assets/demo.png"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:image"
+      content="https://raw.githubusercontent.com/bojackduy/opencode-telescope/main/assets/demo.png"
+    />
     <style>
       :root {
         color-scheme: dark;
@@ -129,6 +137,24 @@
         padding: 1.25rem;
       }
 
+      .demo-card {
+        padding: 0.8rem;
+      }
+
+      .demo-card img {
+        border: 1px solid var(--border);
+        border-radius: 0.9rem;
+        display: block;
+        height: auto;
+        width: 100%;
+      }
+
+      .caption {
+        color: var(--muted);
+        font-size: 0.92rem;
+        margin: 0.8rem 0 0.2rem;
+      }
+
       pre {
         color: #d9e7ff;
         overflow-x: auto;
@@ -153,13 +179,21 @@
         margin-top: 2rem;
       }
 
+      .showcase {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 1rem;
+        margin-top: 2rem;
+      }
+
       @media (max-width: 760px) {
         main {
           padding: 2.5rem 0;
         }
 
         .hero,
-        .grid {
+        .grid,
+        .showcase {
           grid-template-columns: 1fr;
         }
       }
@@ -188,6 +222,25 @@
             Search OpenCode sessions by keyword, preview matches, and jump back
             into the exact conversation without leaving the TUI.
           </p>
+        </div>
+      </section>
+
+      <section class="showcase" aria-label="Demo screenshots">
+        <div class="card demo-card">
+          <img
+            src="https://raw.githubusercontent.com/bojackduy/opencode-telescope/main/assets/demo.png"
+            alt="opencode-telescope fuzzy search UI preview inside the OpenCode terminal"
+            loading="lazy"
+          />
+          <p class="caption">Search across OpenCode sessions with a Telescope-style result list and preview pane.</p>
+        </div>
+        <div class="card demo-card">
+          <img
+            src="https://raw.githubusercontent.com/bojackduy/opencode-telescope/main/assets/demo.gif"
+            alt="Animated opencode-telescope demo showing chat history search and session navigation"
+            loading="lazy"
+          />
+          <p class="caption">Filter conversation history, inspect matches, and jump back to the exact chat.</p>
         </div>
       </section>
 
