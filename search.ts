@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { existsSync, readdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -63,6 +64,46 @@ export type ToolState = {
   error?: string
 }
 
+export type SemanticConfig = {
+  embedBaseUrl: string
+  embedModel?: string
+  disableVector: boolean
+  sqliteLibPath?: string
+  sqliteVecExtension?: string
+  hybridAlpha: number
+  documentPrefix: string
+  queryPrefix: string
+}
+
+export type VectorState = "enabled" | "disabled" | "unavailable" | "stale"
+
+export const DEFAULT_EMBED_BASE_URL = "http://127.0.0.1:8081"
+export const DEFAULT_DOCUMENT_PREFIX = "search_document: "
+export const DEFAULT_QUERY_PREFIX = "search_query: "
+export const DEFAULT_HYBRID_ALPHA = 0.45
+
+export function parseSemanticConfig(env: Record<string, string | undefined> = process.env): SemanticConfig {
+  return {
+    embedBaseUrl: env.OPENCODE_TELESCOPE_EMBED_BASE_URL ?? DEFAULT_EMBED_BASE_URL,
+    embedModel: env.OPENCODE_TELESCOPE_EMBED_MODEL || undefined,
+    disableVector: env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "1" || env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "true",
+    sqliteLibPath: env.OPENCODE_TELESCOPE_SQLITE_LIB || undefined,
+    sqliteVecExtension: env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT || undefined,
+    hybridAlpha: parseAlpha(env.OPENCODE_TELESCOPE_HYBRID_ALPHA),
+    documentPrefix: DEFAULT_DOCUMENT_PREFIX,
+    queryPrefix: DEFAULT_QUERY_PREFIX,
+  }
+}
+
+function parseAlpha(value: string | undefined) {
+  if (!value) return DEFAULT_HYBRID_ALPHA
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return DEFAULT_HYBRID_ALPHA
+  if (parsed < 0) return 0
+  if (parsed > 1) return 1
+  return parsed
+}
+
 type Row = {
   id: string
   message_id: string
@@ -78,6 +119,23 @@ type Row = {
 
 type IndexSourceRow = Omit<Row, "text"> & {
   data: string
+}
+
+export type DocumentRow = {
+  doc_id: string
+  part_id: string
+  message_id: string
+  session_id: string
+  session_title: string
+  directory: string
+  role: string
+  part_type: string
+  tool: string | null
+  time_created: number
+  chunk_index: number
+  text: string
+  source_hash: string
+  extractor_version: string
 }
 
 type ConversationRow = {
@@ -773,7 +831,8 @@ function scheduleBackgroundIndexRebuild(dbPath: string) {
   ;(timer as { unref?: () => void }).unref?.()
 }
 
-const SEARCH_INDEX_VERSION = "6"
+const SEARCH_INDEX_VERSION = "7"
+const DOCUMENT_EXTRACTOR_VERSION = "1"
 
 function searchIndexPath(sourcePath: string) {
   const parsed = path.parse(sourcePath)
@@ -785,6 +844,24 @@ function migrateSearchIndex(db: Database) {
     CREATE TABLE IF NOT EXISTS index_meta(
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS document(
+      rowid INTEGER PRIMARY KEY,
+      doc_id TEXT UNIQUE NOT NULL,
+      part_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      session_title TEXT NOT NULL,
+      directory TEXT NOT NULL,
+      role TEXT NOT NULL,
+      part_type TEXT NOT NULL,
+      tool TEXT,
+      time_created INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      source_hash TEXT NOT NULL,
+      extractor_version TEXT NOT NULL,
+      indexed_at INTEGER NOT NULL
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(
       id UNINDEXED,
@@ -895,7 +972,13 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
       AND json_extract(m.data, '$.role') IN ('user', 'assistant')
     ORDER BY p.time_created DESC
   `).all()
-  const insert = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
+  const now = Date.now()
+  const config = parseSemanticConfig()
+  const insertDoc = index.query<unknown, [string, string, string, string, string, string, string, string, string | null, number, number, string, string, string, number]>(`
+    INSERT INTO document(doc_id, part_id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, chunk_index, text, source_hash, extractor_version, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertFts = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
     INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
@@ -905,10 +988,30 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
   `)
   index.exec("BEGIN IMMEDIATE")
   try {
+    index.exec("DELETE FROM document")
     index.exec("DELETE FROM document_fts")
     index.exec("DELETE FROM document_index")
     for (const row of rows.flatMap(indexSourceRowToRows)) {
-      insert.run(
+      const docID = `telescope:${row.session_id}:${row.message_id}:${row.id}:0`
+      const sourceHash = hashPartData({ session_id: row.session_id, message_id: row.message_id, part_id: row.id })
+      insertDoc.run(
+        docID,
+        row.id,
+        row.message_id,
+        row.session_id,
+        row.session_title ?? "Untitled session",
+        row.directory,
+        row.role,
+        row.part_type ?? "text",
+        row.tool ?? null,
+        row.time_created,
+        0,
+        row.text,
+        sourceHash,
+        DOCUMENT_EXTRACTOR_VERSION,
+        now,
+      )
+      insertFts.run(
         row.id,
         row.message_id,
         row.session_id,
@@ -937,6 +1040,14 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     setMeta(index, "source_data_version", String(state.dataVersion))
     setMeta(index, "source_mtime_ms", String(state.mtimeMs))
     setMeta(index, "index_version", SEARCH_INDEX_VERSION)
+    setMeta(index, "schema_version", "2")
+    setMeta(index, "extractor_version", DOCUMENT_EXTRACTOR_VERSION)
+    setMeta(index, "ranking_version", "1")
+    setMeta(index, "vector_state", config.disableVector ? "disabled" : "unavailable")
+    setMeta(index, "embedding_base_url", config.embedBaseUrl)
+    setMeta(index, "document_prefix", config.documentPrefix)
+    setMeta(index, "query_prefix", config.queryPrefix)
+    if (config.embedModel) setMeta(index, "embedding_model", config.embedModel)
     index.exec("COMMIT")
   } catch (err) {
     index.exec("ROLLBACK")
@@ -944,6 +1055,10 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
   } finally {
     debug.timeEnd("fts:rebuild")
   }
+}
+
+function hashPartData(value: { session_id: string; message_id: string; part_id: string }) {
+  return createHash("sha256").update(`${value.session_id}:${value.message_id}:${value.part_id}`).digest("hex")
 }
 
 function ftsQuery(query: string) {
