@@ -31,18 +31,20 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
     })
     return
   }
-  const delta = target.y - scroll.y - Math.max(1, Math.floor(scroll.height / 3))
+  const contentY = target.y + scroll.scrollTop - scroll.y
+  const desiredScrollTop = Math.max(0, contentY - Math.max(1, Math.floor(scroll.height / 3)))
   debug.log("preview:target-scroll", {
     targetID,
     targetY: target.y,
     scrollY: scroll.y,
     scrollTop: scroll.scrollTop,
+    contentY,
+    desiredScrollTop,
     scrollHeight: scroll.height,
     contentHeight: scroll.scrollHeight,
-    delta,
   })
-  scroll.scrollBy(delta)
-  debug.log("preview:target-scroll:after", { targetID, scrollY: scroll.y, scrollTop: scroll.scrollTop })
+  scroll.scrollTo(desiredScrollTop)
+  debug.log("preview:target-scroll:after", { targetID, scrollY: scroll.y, scrollTop: scroll.scrollTop, desiredScrollTop })
 }
 
 export function jumpToRenderedTarget(root: unknown, targetID: string) {

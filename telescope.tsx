@@ -764,6 +764,33 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               })
             }
           }
+
+          if (pending.intent === "passive-prefetch") {
+            const matchItem = selectedResult()
+            const scroll = previewScroll
+            if (matchItem && scroll) {
+              const layout = previewVirtualLayout()
+              const matchRow = layout.find((r) => r.part.id === matchItem.id)
+              if (matchRow) {
+                const viewportHeight = scroll.height
+                const desiredScrollTop = Math.max(0, matchRow.top - Math.floor(viewportHeight / 3))
+                const msSinceManual = Date.now() - lastPreviewScrollKeyMs
+                if (Math.abs(scroll.scrollTop - desiredScrollTop) >= 2 && msSinceManual > 700) {
+                  const correctedWindow = previewWindowForLayout(layout, desiredScrollTop, viewportHeight)
+                  setPreviewWindow(correctedWindow)
+                  scroll.scrollTo(desiredScrollTop)
+                  debug.log("preview:load-before:recenter", {
+                    matchPartID: matchItem.id,
+                    matchTop: matchRow.top,
+                    scrollTop: scroll.scrollTop,
+                    desiredScrollTop,
+                    viewportHeight,
+                    window: correctedWindow,
+                  })
+                }
+              }
+            }
+          }
         }, 1)
       }
       setHasMorePreviewBefore(page.hasMoreBefore)
