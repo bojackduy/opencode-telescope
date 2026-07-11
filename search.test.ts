@@ -5,12 +5,14 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import {
   extractSearchText,
+  hybridBlend,
   loadConversationAfter,
   loadConversationAround,
   loadConversationBefore,
   makeSnippet,
   recentSessionMessages,
   rowToSearchResult,
+  rowToVectorResult,
   searchSessionMessages,
   type SearchResult,
 } from "./search"
@@ -422,6 +424,50 @@ describe("session search helpers", () => {
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe("hybrid search helpers", () => {
+  test("hybridBlend returns vector-only rows when keyword rows are empty", () => {
+    const vector: Array<Record<string, unknown>> = [
+      { id: "prt_v1", message_id: "msg_1", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", time_created: 1, text: "vector-only result" },
+    ]
+    const result = hybridBlend([], vector as never, 0.45)
+    expect(result).toHaveLength(1)
+    expect(result[0]?.id).toBe("prt_v1")
+    expect(result[0]?.vectorScore).toBeGreaterThan(0)
+  })
+
+  test("hybridBlend blends keyword and vector rows without duplicates", () => {
+    const keyword: Array<Record<string, unknown>> = [
+      { id: "prt_k1", message_id: "msg_1", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", time_created: 1, text: "keyword match alpha" },
+      { id: "prt_k2", message_id: "msg_2", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", time_created: 2, text: "keyword match beta" },
+    ]
+    const vector: Array<Record<string, unknown>> = [
+      { id: "prt_k1", message_id: "msg_1", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", time_created: 1, text: "keyword match alpha" },
+      { id: "prt_v1", message_id: "msg_3", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", time_created: 3, text: "vector-only result" },
+    ]
+    const result = hybridBlend(keyword as never, vector as never, 0.45)
+    const ids = result.map((r) => r.id)
+    expect(ids).toContain("prt_k1")
+    expect(ids).toContain("prt_k2")
+    expect(ids).toContain("prt_v1")
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  test("rowToVectorResult creates a valid SearchResult with matchStart = -1", () => {
+    const row = { id: "prt_v1", message_id: "msg_1", session_id: "ses_1", session_title: "Test", directory: "/tmp", role: "assistant", part_type: "text", tool: null, time_created: 1, text: "vector semantic match content" }
+    const result = rowToVectorResult(row as never)
+    expect(result).toBeDefined()
+    expect(result!.id).toBe("prt_v1")
+    expect(result!.matchStart).toBe(-1)
+    expect(result!.previewHighlight).toBe(false)
+    expect(result!.text).toBe("vector semantic match content")
+  })
+
+  test("hybridBlend handles empty inputs gracefully", () => {
+    expect(hybridBlend([], [], 0.45)).toEqual([])
+    expect(hybridBlend([], [{ id: "prt_v1", message_id: "msg_1", session_id: "ses_1", session_title: "T", directory: "/d", role: "assistant", time_created: 1, text: "x" } as never], 0.45)).toHaveLength(1)
   })
 })
 

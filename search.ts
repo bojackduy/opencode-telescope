@@ -1162,6 +1162,173 @@ async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
   debug.log("vector:rebuild:done", { vectors: docs.length, dimensions: dims })
 }
 
+export type ScoredRow = Row & {
+  score: number
+  keywordScore: number
+  vectorScore: number
+}
+
+function searchVector(index: Database, embedding: Float32Array, limit: number): Row[] {
+  const count = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_vec").get()?.count ?? 0
+  if (!count) return []
+  const k = Math.min(count, Math.max(limit * 4, 200))
+  return index.query<Row, [Float32Array, number]>(`
+    SELECT d.part_id AS id, d.message_id, d.session_id, d.session_title, d.directory, d.role,
+           d.part_type, d.tool, CAST(d.time_created AS INTEGER) AS time_created, d.text
+    FROM document_vec v
+    JOIN document d ON d.rowid = v.rowid
+    WHERE v.embedding MATCH vec_f32(?) AND k = ?
+    ORDER BY v.distance
+  `).all(embedding, k)
+}
+
+export function hybridBlend(keyword: Row[], vector: Row[], alpha: number): ScoredRow[] {
+  const merged = new Map<string, ScoredRow>()
+  const defaultScore = 1 / Math.max(keyword.length, 1)
+
+  for (const [i, row] of keyword.entries()) {
+    merged.set(row.id, {
+      ...row,
+      score: 0,
+      keywordScore: keyword.length > 1 ? 1 - i / (keyword.length - 1) : 1,
+      vectorScore: 0,
+    })
+  }
+
+  for (const [i, row] of vector.entries()) {
+    const existing = merged.get(row.id)
+    const vectorScore = vector.length > 1 ? 1 - i / (vector.length - 1) : 1
+    if (existing) {
+      existing.vectorScore = vectorScore
+    } else {
+      merged.set(row.id, {
+        ...row,
+        score: 0,
+        keywordScore: defaultScore,
+        vectorScore,
+      })
+    }
+  }
+
+  const keywordValues = [...merged.values()].map((r) => r.keywordScore)
+  const vectorValues = [...merged.values()].map((r) => r.vectorScore)
+  const kwMin = Math.min(...keywordValues)
+  const kwMax = Math.max(...keywordValues)
+  const vecMin = Math.min(...vectorValues)
+  const vecMax = Math.max(...vectorValues)
+
+  const normalized = [...merged.values()].map((r) => {
+    const kn = kwMax === kwMin ? 0.5 : (r.keywordScore - kwMin) / (kwMax - kwMin)
+    const vn = vecMax === vecMin ? 0.5 : (r.vectorScore - vecMin) / (vecMax - vecMin)
+    return {
+      ...r,
+      keywordScore: kn,
+      vectorScore: vn,
+      score: (1 - alpha) * kn + alpha * vn,
+    }
+  })
+
+  return normalized.sort((a, b) => b.score - a.score)
+}
+
+export type HybridSearchOptions = {
+  limit?: number
+  offset?: number
+  directory?: string
+  role?: SearchRole
+  dbPath?: string
+}
+
+export async function semanticSearchSessionMessages(query: string, options?: HybridSearchOptions): Promise<SearchResult[]> {
+  const term = query.trim()
+  if (!term) return []
+  if (options?.dbPath === ":memory:") return []
+  const dbPath = options?.dbPath ?? resolveDatabasePath()
+  const db = getDb(dbPath)
+  const limit = options?.limit ?? 80
+  const dir = options?.directory
+  const role = options?.role
+
+  const index = ensureSearchIndex(db, dbPath)
+  if (!index) return []
+
+  const keyword = indexedTextRows(db, dbPath, limit, term, dir, options?.offset, role) ?? []
+  const config = parseSemanticConfig()
+
+  let vector: Row[] = []
+  if (!config.disableVector) {
+    const vecState = getMeta(index, "vector_state")
+    if (vecState === "enabled") {
+      try {
+        const client = new LlamaEmbeddingClient({
+          baseUrl: config.embedBaseUrl,
+          model: config.embedModel,
+          documentPrefix: config.documentPrefix,
+          queryPrefix: config.queryPrefix,
+        })
+        const embedding = await client.embedQuery(term)
+        vector = searchVector(index, embedding, limit)
+        debug.log("query:vector:results", { count: vector.length })
+      } catch (err) {
+        debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
+      }
+    }
+  }
+
+  const merged = keyword.length || vector.length
+    ? hybridBlend(keyword, vector, config.hybridAlpha)
+    : []
+
+  const results: SearchResult[] = []
+  const seen = new Set<string>()
+  for (const row of merged) {
+    const result = rowToSearchResult(row, term) ?? rowToVectorResult(row)
+    if (result) {
+      seen.add(row.id)
+      results.push(result)
+    }
+  }
+
+  for (const row of vector) {
+    if (!seen.has(row.id)) {
+      const result = rowToSearchResult(row, term) ?? rowToVectorResult(row)
+      if (result) results.push(result)
+    }
+  }
+
+  return results
+}
+
+export function rowToVectorResult(row: Row): SearchResult | undefined {
+  const text = row.text.trim()
+  if (!text) return
+  const excerpt = text.slice(0, 200)
+  return {
+    id: row.id,
+    messageID: row.message_id,
+    sessionID: row.session_id,
+    sessionTitle: row.session_title || "Untitled session",
+    directory: row.directory,
+    role: row.role,
+    partType: row.part_type ?? "text",
+    tool: row.tool ?? undefined,
+    timeCreated: row.time_created,
+    snippet: excerpt,
+    matchStart: -1,
+    matchEnd: -1,
+    before: "",
+    match: "",
+    after: excerpt,
+    excerpt,
+    previewBefore: text.slice(0, Math.min(text.length, 1400)),
+    previewMatch: "",
+    previewAfter: "",
+    previewMode: "markdown" as const,
+    previewHighlight: false,
+    text,
+  }
+}
+
 function ftsQuery(query: string) {
   const tokens = query.trim().split(/\s+/)
     .map((token) => token.replace(/["*^:()]/g, " ").trim())
