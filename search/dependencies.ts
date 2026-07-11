@@ -25,21 +25,21 @@ async function checkEmbeddingServerInner(baseUrl: string): Promise<DependencySta
 }
 
 export function checkSqliteVec(sqliteVecPath?: string): DependencyStatus {
-  if (!sqliteVecPath && !process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT) {
-    return { state: "unavailable", message: "no vec0 extension path configured" }
+  if (sqliteVecPath || process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT) {
+    const resolved = sqliteVecPath ?? process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT!
+    if (!existsSync(resolved)) {
+      return { state: "unavailable", message: `vec0 extension not found at: ${resolved}` }
+    }
+    try {
+      const db = new Database(":memory:")
+      db.loadExtension(resolved)
+      db.close()
+      return { state: "available", message: `vec0 extension loaded from: ${resolved}` }
+    } catch (err) {
+      return { state: "unavailable", message: `vec0 extension failed to load: ${err instanceof Error ? err.message : String(err)}` }
+    }
   }
-  const resolved = sqliteVecPath ?? process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT!
-  if (!existsSync(resolved)) {
-    return { state: "unavailable", message: `vec0 extension not found at: ${resolved}` }
-  }
-  try {
-    const db = new Database(":memory:")
-    db.loadExtension(resolved)
-    db.close()
-    return { state: "available", message: `vec0 extension loaded from: ${resolved}` }
-  } catch (err) {
-    return { state: "unavailable", message: `vec0 extension failed to load: ${err instanceof Error ? err.message : String(err)}` }
-  }
+  return { state: "unavailable", message: "sqlite-vec npm package or explicit extension path required" }
 }
 
 export function checkCustomSqlite(libPath?: string): DependencyStatus {

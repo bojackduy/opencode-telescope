@@ -793,6 +793,7 @@ function ensureSearchIndex(source: Database, sourcePath: string, options?: { reb
   const indexPath = searchIndexPath(sourcePath)
   if (!_indexDb || _indexDbPath !== indexPath) {
     _indexDb?.close()
+    configureCustomSQLite()
     _indexDb = new Database(indexPath)
     _indexDbPath = indexPath
     migrateSearchIndex(_indexDb)
@@ -1067,99 +1068,129 @@ function hashPartData(value: { session_id: string; message_id: string; part_id: 
   return createHash("sha256").update(`${value.session_id}:${value.message_id}:${value.part_id}`).digest("hex")
 }
 
-function resolveVecExtensionPath(config: SemanticConfig) {
-  const fromConfig = config.sqliteVecExtension
-  const fromEnv = process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT
-  const candidate = fromConfig || fromEnv
-  if (candidate && existsSync(candidate)) return candidate
+let customSQLiteConfigured = false
+
+function configureCustomSQLite() {
+  if (customSQLiteConfigured) return
+  const config = parseSemanticConfig()
   if (config.disableVector) return
-  if (!candidate) {
-    debug.log("vector:extension:not-configured", { message: "no vec0 extension path configured" })
-  } else {
-    debug.log("vector:extension:not-found", { path: candidate })
+  customSQLiteConfigured = true
+
+  const candidates = [
+    config.sqliteLibPath,
+    process.platform === "darwin" ? "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib" : undefined,
+    process.platform === "darwin" ? "/usr/local/opt/sqlite/lib/libsqlite3.dylib" : undefined,
+  ].filter((item): item is string => Boolean(item))
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      try {
+        Database.setCustomSQLite(candidate)
+        debug.log("custom-sqlite:set", { path: candidate })
+        return
+      } catch (err) {
+        debug.log("custom-sqlite:error", { path: candidate, error: err instanceof Error ? err.message : String(err) })
+      }
+    }
   }
+}
+
+function importPackage(specifier: string) {
+  return new Function("specifier", "return import(specifier)")(specifier) as Promise<{ default?: { load?: (db: Database) => void } }>
+}
+
+async function loadVecExtension(db: Database): Promise<boolean> {
+  try {
+    const sqliteVec = await importPackage("sqlite-vec").catch(() => undefined)
+    if (sqliteVec?.default?.load) {
+      sqliteVec.default.load(db)
+      debug.log("vector:extension:loaded", { source: "npm" })
+      return true
+    }
+  } catch {
+    debug.log("vector:extension:npm-failed")
+  }
+
+  const config = parseSemanticConfig()
+  const explicitPath = config.sqliteVecExtension || process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT
+  if (explicitPath && existsSync(explicitPath)) {
+    try {
+      db.loadExtension(explicitPath)
+      debug.log("vector:extension:loaded", { source: "path", path: explicitPath })
+      return true
+    } catch (err) {
+      debug.log("vector:extension:path-failed", { path: explicitPath, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  return false
 }
 
 function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string) {
-  const vecPath = resolveVecExtensionPath(config)
-  if (!vecPath) {
-    setMeta(index, "vector_state", "unavailable")
-    return
-  }
-  try {
-    index.loadExtension(vecPath)
-    index.exec("CREATE VIRTUAL TABLE IF NOT EXISTS document_vec USING vec0(embedding float[768])")
-    setMeta(index, "vector_state", "stale")
-    debug.log("vector:table:ready", { path: vecPath })
-    rebuildVectorIndex(indexPath, config).catch((err: Error) => {
-      debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
-    })
-  } catch (err) {
-    debug.log("vector:extension:load-failed", err instanceof Error ? err.message : String(err))
-    setMeta(index, "vector_state", "unavailable")
-  }
+  setMeta(index, "vector_state", "stale")
+  rebuildVectorIndex(indexPath, config).catch((err: Error) => {
+    debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
+  })
 }
 
 async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
-  const vecPath = resolveVecExtensionPath(config)
-  if (!vecPath) return
-
+  configureCustomSQLite()
   const db = new Database(indexPath)
   try {
-    db.loadExtension(vecPath)
-  } catch {
-    setMeta(db, "vector_state", "unavailable")
-    return
-  }
-
-  const client = new LlamaEmbeddingClient({
-    baseUrl: config.embedBaseUrl,
-    model: config.embedModel,
-    documentPrefix: config.documentPrefix,
-    queryPrefix: config.queryPrefix,
-  })
-  let healthy = false
-  try {
-    healthy = await client.health()
-  } catch {
-    setMeta(db, "vector_state", "unavailable")
-    return
-  }
-  if (!healthy) {
-    setMeta(db, "vector_state", "unavailable")
-    return
-  }
-
-  const docs = db.query<{ rowid: number; text: string }, []>("SELECT rowid, text FROM document ORDER BY rowid ASC").all()
-  if (!docs.length) {
-    setMeta(db, "vector_state", "enabled")
-    return
-  }
-
-  debug.log("vector:embed:start", { count: docs.length })
-  const embeddings = await client.embedDocuments(docs.map((d) => d.text))
-  const dims = embeddings[0]?.length
-  if (!dims) {
-    setMeta(db, "vector_state", "unavailable")
-    return
-  }
-
-  db.exec("DROP TABLE IF EXISTS document_vec")
-  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vec USING vec0(embedding float[${dims}])`)
-  debug.log("vector:table:recreated", { dimensions: dims })
-
-  const insert = db.prepare<unknown, [number, Float32Array]>("INSERT INTO document_vec(rowid, embedding) VALUES (?, vec_f32(?))")
-  const transaction = db.transaction(() => {
-    for (const [i, doc] of docs.entries()) {
-      insert.run(doc.rowid, embeddings[i])
+    const loaded = await loadVecExtension(db)
+    if (!loaded) {
+      setMeta(db, "vector_state", "unavailable")
+      return
     }
-  })
-  transaction()
 
-  setMeta(db, "vector_state", "enabled")
-  setMeta(db, "embedding_dimensions", String(dims))
-  if (config.embedModel) setMeta(db, "embedding_model", config.embedModel)
-  debug.log("vector:rebuild:done", { vectors: docs.length, dimensions: dims })
+    const client = new LlamaEmbeddingClient({
+      baseUrl: config.embedBaseUrl,
+      model: config.embedModel,
+      documentPrefix: config.documentPrefix,
+      queryPrefix: config.queryPrefix,
+    })
+    const healthy = await client.health()
+    if (!healthy) {
+      setMeta(db, "vector_state", "unavailable")
+      return
+    }
+
+    const docs = db.query<{ rowid: number; text: string }, []>("SELECT rowid, text FROM document ORDER BY rowid ASC").all()
+    if (!docs.length) {
+      setMeta(db, "vector_state", "enabled")
+      return
+    }
+
+    debug.log("vector:embed:start", { count: docs.length })
+    const embeddings = await client.embedDocuments(docs.map((d) => d.text))
+    const dims = embeddings[0]?.length
+    if (!dims) {
+      setMeta(db, "vector_state", "unavailable")
+      return
+    }
+
+    db.exec("DROP TABLE IF EXISTS document_vec")
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vec USING vec0(embedding float[${dims}])`)
+    debug.log("vector:table:recreated", { dimensions: dims })
+
+    const insert = db.prepare<unknown, [number, Float32Array]>("INSERT INTO document_vec(rowid, embedding) VALUES (?, vec_f32(?))")
+    const transaction = db.transaction(() => {
+      for (const [i, doc] of docs.entries()) {
+        insert.run(doc.rowid, embeddings[i])
+      }
+    })
+    transaction()
+
+    setMeta(db, "vector_state", "enabled")
+    setMeta(db, "embedding_dimensions", String(dims))
+    if (config.embedModel) setMeta(db, "embedding_model", config.embedModel)
+    debug.log("vector:rebuild:done", { vectors: docs.length, dimensions: dims })
+  } catch (err) {
+    setMeta(db, "vector_state", "unavailable")
+    debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
+  } finally {
+    db.close()
+  }
 }
 
 export type ScoredRow = Row & {

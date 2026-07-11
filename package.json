@@ -60,6 +60,9 @@
       "import": "./tui.tsx"
     }
   },
+  "dependencies": {
+    "sqlite-vec": "^0.1.9"
+  },
   "peerDependencies": {
     "@opencode-ai/plugin": "*",
     "@opentui/core": "*",
