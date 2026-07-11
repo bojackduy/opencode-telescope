@@ -1239,6 +1239,19 @@ export type HybridSearchOptions = {
   dbPath?: string
 }
 
+export async function performSearch(query: string, options?: HybridSearchOptions): Promise<SearchResult[]> {
+  if (!query.trim()) return searchSessionMessages(query, options)
+  const config = parseSemanticConfig()
+  if (!config.disableVector) {
+    try {
+      return await semanticSearchSessionMessages(query, options)
+    } catch {
+      debug.log("query:hybrid:fallback", { message: "hybrid search failed, falling back to keyword" })
+    }
+  }
+  return searchSessionMessages(query, options)
+}
+
 export async function semanticSearchSessionMessages(query: string, options?: HybridSearchOptions): Promise<SearchResult[]> {
   const term = query.trim()
   if (!term) return []

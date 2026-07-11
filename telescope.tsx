@@ -9,6 +9,8 @@ import {
   loadConversationAfter,
   loadConversationAround,
   loadConversationBefore,
+  parseSemanticConfig,
+  performSearch,
   recentSessionMessages,
   resolveDatabasePath,
   searchSessionMessages,
@@ -35,6 +37,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [nextResultOffset, setNextResultOffset] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
+  const [searchMode, setSearchMode] = createSignal<"keyword" | "hybrid">("keyword")
   const [mode, setMode] = createSignal<"normal" | "insert">("normal")
   const [loading, setLoading] = createSignal(true)
   const [hasMore, setHasMore] = createSignal(true)
@@ -196,18 +199,25 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     })
   })
 
-  const executeSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
+  const detectSearchMode = () => {
+    if (!query().trim()) return "keyword" as const
+    const config = parseSemanticConfig()
+    return config.disableVector ? "keyword" as const : "hybrid" as const
+  }
+
+  const executeSearch = async (q: string, role: SearchRole | undefined, db: string, dir: string) => {
     lastFiredQuery = q
     const limit = q ? Math.min(searchBatchSize(), 80) : recentBatchSize()
     setLoading(true)
     if (q) setBusy(true)
+    setSearchMode(detectSearchMode())
     debug.time("query:search")
     try {
       debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)" })
       const batch = q
-        ? searchSessionMessages(q, { limit, offset: 0, dbPath: db, directory: dir, role })
+        ? await performSearch(q, { limit, offset: 0, dbPath: db, directory: dir, role })
         : recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
-      debug.log("bootstrap:search:done", { rows: batch.length, limit })
+      debug.log("bootstrap:search:done", { rows: batch.length, limit, mode: searchMode() })
       solidBatch(() => {
         setResults(batch)
         setResultBaseOffset(0)
@@ -266,7 +276,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     })
   })
 
-  const loadMoreResults = (advance = false) => {
+  const loadMoreResults = async (advance = false) => {
     if (advance) advanceSelectionAfterLoad = true
     if (!hasMore()) {
       advanceSelectionAfterLoad = false
@@ -285,7 +295,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     debug.time("query:load-more")
     try {
       const batch = q
-        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir, role })
+        ? await performSearch(q, { limit, offset, dbPath: db, directory: dir, role })
         : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
       const nextHasMore = batch.length >= limit
       const nextLoadedUntil = offset + batch.length
@@ -1248,7 +1258,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? `searching ${ownerLabel()}` : loading() ? `loading ${ownerLabel()}` : query().trim() ? (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerLabel()} 0 hits`) : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
+                <text fg={theme().textMuted}>{busy() ? `searching ${ownerLabel()}` : loading() ? `loading ${ownerLabel()}` : query().trim() ? (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerLabel()} 0 hits`) + (query().trim() ? ` [${searchMode()}]` : "") : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
               </box>
             </box>
 
