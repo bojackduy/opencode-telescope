@@ -4,6 +4,7 @@ import { existsSync, readdirSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { debug } from "./ui/debug.ts"
+import { LlamaEmbeddingClient } from "./search/embedding.ts"
 
 export type SearchResult = {
   id: string
@@ -1043,7 +1044,6 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     setMeta(index, "schema_version", "2")
     setMeta(index, "extractor_version", DOCUMENT_EXTRACTOR_VERSION)
     setMeta(index, "ranking_version", "1")
-    setMeta(index, "vector_state", config.disableVector ? "disabled" : "unavailable")
     setMeta(index, "embedding_base_url", config.embedBaseUrl)
     setMeta(index, "document_prefix", config.documentPrefix)
     setMeta(index, "query_prefix", config.queryPrefix)
@@ -1055,10 +1055,111 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
   } finally {
     debug.timeEnd("fts:rebuild")
   }
+
+  if (config.disableVector) {
+    setMeta(index, "vector_state", "disabled")
+  } else {
+    setupVectorTable(index, config, searchIndexPath(sourcePath))
+  }
 }
 
 function hashPartData(value: { session_id: string; message_id: string; part_id: string }) {
   return createHash("sha256").update(`${value.session_id}:${value.message_id}:${value.part_id}`).digest("hex")
+}
+
+function resolveVecExtensionPath(config: SemanticConfig) {
+  const fromConfig = config.sqliteVecExtension
+  const fromEnv = process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT
+  const candidate = fromConfig || fromEnv
+  if (candidate && existsSync(candidate)) return candidate
+  if (config.disableVector) return
+  if (!candidate) {
+    debug.log("vector:extension:not-configured", { message: "no vec0 extension path configured" })
+  } else {
+    debug.log("vector:extension:not-found", { path: candidate })
+  }
+}
+
+function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string) {
+  const vecPath = resolveVecExtensionPath(config)
+  if (!vecPath) {
+    setMeta(index, "vector_state", "unavailable")
+    return
+  }
+  try {
+    index.loadExtension(vecPath)
+    index.exec("CREATE VIRTUAL TABLE IF NOT EXISTS document_vec USING vec0(embedding float[768])")
+    setMeta(index, "vector_state", "stale")
+    debug.log("vector:table:ready", { path: vecPath })
+    rebuildVectorIndex(indexPath, config).catch((err: Error) => {
+      debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
+    })
+  } catch (err) {
+    debug.log("vector:extension:load-failed", err instanceof Error ? err.message : String(err))
+    setMeta(index, "vector_state", "unavailable")
+  }
+}
+
+async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
+  const vecPath = resolveVecExtensionPath(config)
+  if (!vecPath) return
+
+  const db = new Database(indexPath)
+  try {
+    db.loadExtension(vecPath)
+  } catch {
+    setMeta(db, "vector_state", "unavailable")
+    return
+  }
+
+  const client = new LlamaEmbeddingClient({
+    baseUrl: config.embedBaseUrl,
+    model: config.embedModel,
+    documentPrefix: config.documentPrefix,
+    queryPrefix: config.queryPrefix,
+  })
+  let healthy = false
+  try {
+    healthy = await client.health()
+  } catch {
+    setMeta(db, "vector_state", "unavailable")
+    return
+  }
+  if (!healthy) {
+    setMeta(db, "vector_state", "unavailable")
+    return
+  }
+
+  const docs = db.query<{ rowid: number; text: string }, []>("SELECT rowid, text FROM document ORDER BY rowid ASC").all()
+  if (!docs.length) {
+    setMeta(db, "vector_state", "enabled")
+    return
+  }
+
+  debug.log("vector:embed:start", { count: docs.length })
+  const embeddings = await client.embedDocuments(docs.map((d) => d.text))
+  const dims = embeddings[0]?.length
+  if (!dims) {
+    setMeta(db, "vector_state", "unavailable")
+    return
+  }
+
+  db.exec("DROP TABLE IF EXISTS document_vec")
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS document_vec USING vec0(embedding float[${dims}])`)
+  debug.log("vector:table:recreated", { dimensions: dims })
+
+  const insert = db.prepare<unknown, [number, Float32Array]>("INSERT INTO document_vec(rowid, embedding) VALUES (?, vec_f32(?))")
+  const transaction = db.transaction(() => {
+    for (const [i, doc] of docs.entries()) {
+      insert.run(doc.rowid, embeddings[i])
+    }
+  })
+  transaction()
+
+  setMeta(db, "vector_state", "enabled")
+  setMeta(db, "embedding_dimensions", String(dims))
+  if (config.embedModel) setMeta(db, "embedding_model", config.embedModel)
+  debug.log("vector:rebuild:done", { vectors: docs.length, dimensions: dims })
 }
 
 function ftsQuery(query: string) {
