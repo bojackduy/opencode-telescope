@@ -98,6 +98,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let searchTimer: ReturnType<typeof setTimeout> | undefined
   let lastFiredQuery = ""
+  let searchRequestId = 0
+  let searchWorker: Worker | undefined
   const SEARCH_DEBOUNCE_MS = 200
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
@@ -131,10 +133,60 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
   }
+  const ensureSearchWorker = () => {
+    if (searchWorker) return true
+    try {
+      searchWorker = new Worker(new URL("./search-worker.ts", import.meta.url))
+      searchWorker.onmessage = (event: MessageEvent) => {
+        const msg = event.data
+        if (msg.type === "search-result") {
+          if (msg.id !== searchRequestId) return
+          const batch = msg.result
+          const limit = msg.limit
+          debug.log("bootstrap:search:done", { rows: batch.length, limit, mode: searchMode() })
+          solidBatch(() => {
+            setResults(batch)
+            setResultBaseOffset(0)
+            setNextResultOffset(batch.length)
+            setHasMore(batch.length >= limit)
+            setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
+            setSelected(0)
+          })
+          setBusy(false)
+          setLoading(false)
+          debug.timeEnd("query:search")
+        }
+        if (msg.type === "error") {
+          if (msg.id !== searchRequestId) return
+          debug.log("bootstrap:search:error", msg.error)
+          solidBatch(() => {
+            setResults([])
+            setResultBaseOffset(0)
+            setNextResultOffset(0)
+            setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: 0, lastOffset: 0, lastAdded: 0 })
+          })
+          setError(msg.error)
+          setBusy(false)
+          setLoading(false)
+          debug.timeEnd("query:search")
+        }
+      }
+      searchWorker.onerror = (err) => {
+        debug.log("worker:error", err.message)
+      }
+      return true
+    } catch (err) {
+      debug.log("worker:create-error", err instanceof Error ? err.message : String(err))
+      return false
+    }
+  }
+
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
     if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
     cancelPreviewPrefetch()
+    searchWorker?.terminate()
+    searchWorker = undefined
   })
 
   const resultRowHeight = createMemo(() => leftWidth() >= 48 ? 3 : 4)
@@ -205,41 +257,31 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     return config.disableVector ? "keyword" as const : "hybrid" as const
   }
 
-  const executeSearch = async (q: string, role: SearchRole | undefined, db: string, dir: string) => {
+  const executeSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
     lastFiredQuery = q
     const limit = q ? Math.min(searchBatchSize(), 80) : recentBatchSize()
+    setError("")
+    setHasMore(true)
+    advanceSelectionAfterLoad = false
+    advanceSelectionBeforeLoad = false
+    resultNavigationStarted = false
+    setLoadingMore(false)
+    setLoadingPreviousResults(false)
+    setPrefetchingResults(false)
     setLoading(true)
     if (q) setBusy(true)
     setSearchMode(detectSearchMode())
     debug.time("query:search")
-    try {
-      debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)" })
-      const batch = q
-        ? await performSearch(q, { limit, offset: 0, dbPath: db, directory: dir, role })
-        : recentSessionMessages({ limit, offset: 0, dbPath: db, directory: dir, role })
-      debug.log("bootstrap:search:done", { rows: batch.length, limit, mode: searchMode() })
-      solidBatch(() => {
-        setResults(batch)
-        setResultBaseOffset(0)
-        setNextResultOffset(batch.length)
-        setHasMore(batch.length >= limit)
-        setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-        setSelected(0)
-      })
-    } catch (err) {
-      debug.log("bootstrap:search:error", err instanceof Error ? err.message : String(err))
-      solidBatch(() => {
-        setResults([])
-        setResultBaseOffset(0)
-        setNextResultOffset(0)
-        setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: limit, lastOffset: 0, lastAdded: 0 })
-      })
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
+    const id = ++searchRequestId
+    if (!ensureSearchWorker()) {
       debug.timeEnd("query:search")
-      setBusy(false)
-      setLoading(false)
+      return
     }
+    const msg = q
+      ? { type: "search" as const, id, query: q, limit, offset: 0, directory: dir, role, dbPath: db }
+      : { type: "recent" as const, id, limit, offset: 0, directory: dir, role, dbPath: db }
+    debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)", worker: true })
+    searchWorker!.postMessage(msg)
   }
 
   const scheduleSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
@@ -254,21 +296,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   createEffect(() => {
     const q = query().trim()
     const role = ownerRole()
-    setError("")
-    setHasMore(true)
-    if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
-    if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
-    resultPrefetchTimer = undefined
-    resultPreviousTimer = undefined
-    advanceSelectionAfterLoad = false
-    advanceSelectionBeforeLoad = false
-    resultNavigationStarted = false
-    setLoadingMore(false)
-    setLoadingPreviousResults(false)
-    setPrefetchingResults(false)
     const db = dbPath()
     const dir = directory
-
     scheduleSearch(q, role, db, dir)
     onCleanup(() => {
       if (searchTimer) clearTimeout(searchTimer)
