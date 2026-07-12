@@ -3,20 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>opencode-telescope - Fuzzy Search for OpenCode Chat History</title>
+    <title>opencode-telescope - Fuzzy and Semantic Search for OpenCode Chat History</title>
     <meta
       name="description"
-      content="opencode-telescope is an OpenCode TUI plugin for fuzzy-searching local conversation history, session transcripts, AI coding chats, and old code snippets."
+      content="opencode-telescope is an OpenCode TUI plugin for fuzzy and semantic search across local conversation history, session transcripts, AI coding chats, and old code snippets."
     />
     <meta
       name="keywords"
-      content="OpenCode, OpenCode plugin, OpenCode TUI, fuzzy search, conversation search, chat history search, AI coding session search, LLM history, telescope"
+      content="OpenCode, OpenCode plugin, OpenCode TUI, fuzzy search, semantic search, vector search, embeddings, sqlite-vec, conversation search, chat history search, AI coding session search, LLM history, telescope"
     />
     <link rel="canonical" href="https://bojackduy.github.io/opencode-telescope/" />
     <meta property="og:title" content="opencode-telescope" />
     <meta
       property="og:description"
-      content="Fuzzy-search local OpenCode conversations, session transcripts, and past AI coding chats from the TUI."
+      content="Fuzzy and semantic search for local OpenCode conversations, session transcripts, and past AI coding chats from the TUI."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://bojackduy.github.io/opencode-telescope/" />
@@ -207,8 +207,8 @@
           <h1>Find the chat where it happened.</h1>
           <p>
             <strong>opencode-telescope</strong> adds a Telescope-style fuzzy finder
-            to OpenCode so you can search local conversation history, session
-            transcripts, AI coding chats, and old code snippets from the terminal.
+            to OpenCode so you can search local conversation history by keyword
+            or meaning, recover old code snippets, and jump back to the exact chat.
           </p>
           <div class="actions">
             <a class="button primary" href="https://www.npmjs.com/package/@bojackduy/opencode-telescope">Install from npm</a>
@@ -219,8 +219,8 @@
           <h2>Package</h2>
           <pre><code>@bojackduy/opencode-telescope</code></pre>
           <p>
-            Search OpenCode sessions by keyword, preview matches, and jump back
-            into the exact conversation without leaving the TUI.
+            Search OpenCode sessions by keyword or semantic similarity, preview
+            matches, and jump back into the exact conversation without leaving the TUI.
           </p>
         </div>
       </section>
@@ -246,17 +246,32 @@
 
       <section class="grid" aria-label="Features">
         <div class="card">
-          <h2>Fuzzy search</h2>
-          <p>Grep across local OpenCode session messages and quickly narrow results.</p>
+          <h2>Fuzzy + semantic</h2>
+          <p>Grep exact words or use local embeddings to find conversations by meaning.</p>
         </div>
         <div class="card">
-          <h2>Live preview</h2>
-          <p>Preview the matching conversation before opening the selected session.</p>
+          <h2>Hybrid ranking</h2>
+          <p>Blend SQLite FTS matches with vector results from a local sidecar index.</p>
         </div>
         <div class="card">
           <h2>Local first</h2>
-          <p>Reads the local OpenCode SQLite session database in read-only mode.</p>
+          <p>Reads OpenCode's SQLite database in read-only mode and uses your local embedding server.</p>
         </div>
+      </section>
+
+      <section style="margin-top: 2rem">
+        <h2>Semantic memory search</h2>
+        <p>
+          Run a local <code>llama-server</code> embedding endpoint and Telescope can build a
+          <code>sqlite-vec</code> sidecar index for meaning-based recall. If vector dependencies
+          are missing, keyword search keeps working.
+        </p>
+        <pre><code>OPENCODE_TELESCOPE_EMBED_BASE_URL=http://127.0.0.1:8081
+OPENCODE_TELESCOPE_EMBED_MODEL=nomic-embed-text-v1.5
+OPENCODE_TELESCOPE_HYBRID_ALPHA=0.45</code></pre>
+        <p>
+          <a href="https://github.com/bojackduy/opencode-telescope/blob/main/docs/semantic-search.md">Read the semantic search setup guide</a>
+        </p>
       </section>
 
       <section style="margin-top: 2rem">
@@ -266,14 +281,15 @@
 }</code></pre>
         <p>
           Open search with <code>&lt;leader&gt;f</code> or <code>/telescope</code>, type
-          to filter conversation text, then press <code>Enter</code> to jump to the
-          selected OpenCode session.
+          to filter conversation text or describe the idea you remember, then press
+          <code>Enter</code> to jump to the selected OpenCode session.
         </p>
       </section>
 
       <nav class="links" aria-label="Project links">
         <a href="https://github.com/bojackduy/opencode-telescope">GitHub repository</a>
         <a href="https://www.npmjs.com/package/@bojackduy/opencode-telescope">npm package</a>
+        <a href="https://github.com/bojackduy/opencode-telescope/blob/main/docs/semantic-search.md">Semantic search guide</a>
         <a href="https://github.com/bojackduy/opencode-telescope/issues">Issues</a>
         <a href="https://bojackduy.github.io/opencode-telescope/sitemap.xml">Sitemap</a>
       </nav>
