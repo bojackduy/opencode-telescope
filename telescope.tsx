@@ -363,7 +363,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }
   }
 
-  const loadPreviousResults = (advance = false) => {
+  const loadPreviousResults = async (advance = false) => {
     if (advance) advanceSelectionBeforeLoad = true
     const base = resultBaseOffset()
     if (base <= 0) {
@@ -384,7 +384,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     debug.time("query:load-before")
     try {
       const batch = q
-        ? searchSessionMessages(q, { limit, offset, dbPath: db, directory: dir, role })
+        ? await performSearch(q, { limit, offset, dbPath: db, directory: dir, role })
         : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
       const nextSelected = advanceSelectionBeforeLoad && batch.length > 0 ? base - 1 : selected()
       debug.log("results:load-before", { offset, limit, added: batch.length, fromBase: base, toBase: offset, cached: results().length + batch.length, advance })

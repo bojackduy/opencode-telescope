@@ -586,5 +586,7 @@ function previewResult(id: string, messageID: string, sessionID: string, directo
     previewMode: "markdown",
     previewHighlight: false,
     text: "",
+    isVectorMatch: false,
+    semanticScore: 0,
   }
 }

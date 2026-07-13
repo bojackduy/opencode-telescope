@@ -30,6 +30,9 @@ export const ResultRow = (props: {
       <span style={{ fg: props.active ? props.theme.accent : props.theme.text, bold: true }}>
         {truncate(props.item.sessionTitle, sessionTitleWidth(props.width))}
       </span>
+      <Show when={props.item.isVectorMatch}>
+        <span style={{ fg: props.theme.warning }}> ~</span>
+      </Show>
       <Show when={props.width >= 48}>
         <span style={{ fg: props.theme.textMuted }}>  </span>
         <span style={{ fg: roleColor(props.item.role, props.theme), bold: true }}>{roleLabel(props.item.role)}</span>
@@ -46,10 +49,12 @@ export const ResultRow = (props: {
       before={props.item.before}
       match={props.item.match}
       after={props.item.after}
+      excerpt={props.item.excerpt}
       query={props.query}
       active={props.active}
       theme={props.theme}
       maxWidth={props.width}
+      isVectorMatch={props.item.isVectorMatch}
     />
   </box>
 )
@@ -86,17 +91,28 @@ const HighlightedText = (props: {
   before: string
   match: string
   after: string
+  excerpt: string
   query: string
   active: boolean
   theme: TuiThemeCurrent
   maxWidth: number
+  isVectorMatch: boolean
 }) => {
   const textMax = Math.max(10, props.maxWidth - 2)
   const sideMax = Math.floor(textMax * 0.35)
   const matchMax = textMax - sideMax * 2
   const before = truncate(props.before, sideMax)
-  const match = truncate(props.match || props.query, matchMax)
   const after = truncate(props.after, sideMax)
+  if (props.isVectorMatch) {
+    return (
+      <text wrapMode="none" overflow="hidden">
+        <span style={{ fg: props.theme.textMuted }}>  </span>
+        <span style={{ fg: props.theme.warning }}>~ </span>
+        <span style={{ fg: props.active ? props.theme.text : props.theme.textMuted }}>{truncate(props.excerpt, textMax - 2)}</span>
+      </text>
+    )
+  }
+  const match = truncate(props.match || props.query, matchMax)
   return (
     <text wrapMode="none" overflow="hidden">
       <span style={{ fg: props.theme.textMuted }}>  </span>

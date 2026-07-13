@@ -21,6 +21,8 @@ export type SearchResult = {
   previewMode: "markdown" | "text"
   previewHighlight: boolean
   text: string
+  isVectorMatch: boolean
+  semanticScore: number
 }
 
 export type SearchRole = "user" | "assistant"

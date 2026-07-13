@@ -288,6 +288,19 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
         }
       }
     }
+    if (vecState === "stale" && getMeta(index, "embedding_dimensions")) {
+      try {
+        const indexPath = searchIndexPath(dbPath)
+        await vecExtensionLoading.get(indexPath)
+        const test = index.query("SELECT COUNT(*) as count FROM document_vec").get() as { count: number } | undefined
+        if (test && test.count > 0) {
+          setMeta(index, "vector_state", "enabled")
+          vecState = "enabled"
+        }
+      } catch {
+        debug.log("vector:stale:recovery-failed")
+      }
+    }
     if (vecState === "enabled") {
       try {
         const indexPath = searchIndexPath(dbPath)
@@ -314,7 +327,7 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
   const results: SearchResult[] = []
   const seen = new Set<string>()
   for (const row of merged) {
-    const result = rowToSearchResult(row, term) ?? rowToVectorResult(row)
+    const result = rowToSearchResult(row, term) ?? rowToVectorResult(row, row.vectorScore)
     if (result) {
       seen.add(row.id)
       results.push(result)

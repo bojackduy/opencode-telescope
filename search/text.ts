@@ -28,10 +28,12 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     previewMode: preview.mode,
     previewHighlight: preview.highlight,
     text,
+    isVectorMatch: false,
+    semanticScore: 0,
   }
 }
 
-export function rowToVectorResult(row: Row): SearchResult | undefined {
+export function rowToVectorResult(row: Row, vectorScore = 0): SearchResult | undefined {
   const text = row.text.trim()
   if (!text) return
   const excerpt = text.slice(0, 200)
@@ -58,6 +60,8 @@ export function rowToVectorResult(row: Row): SearchResult | undefined {
     previewMode: "markdown" as const,
     previewHighlight: false,
     text,
+    isVectorMatch: true,
+    semanticScore: vectorScore,
   }
 }
 

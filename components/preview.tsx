@@ -48,7 +48,9 @@ export const PreviewHeader = (props: { item: SearchResult | undefined; query: st
           </box>
           <Show when={props.query.trim()}>
             <box width="100%" flexShrink={0}>
-              <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">match: {props.query.trim()}</text>
+              <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
+                {item().isVectorMatch ? "~semantic: " : "match: "}{props.query.trim()}
+              </text>
             </box>
           </Show>
         </>
@@ -316,15 +318,22 @@ const DiffBlock = (props: { diff: string; filePath: string; syntax: SyntaxStyle;
 const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResult; role: string; time: number; theme: TuiThemeCurrent }) => (
   <box flexDirection="column" flexShrink={0}>
     <text fg={props.theme.warning} wrapMode="none" overflow="hidden">
-      <span>match</span>
+      <span>{props.item?.isVectorMatch ? "~semantic" : "match"}</span>
       <span style={{ fg: props.theme.textMuted }}> · {props.role} · {compactTime(props.time)}</span>
     </text>
-    <Show when={props.item && matchExcerpt(props.part.text, props.item.match)}>
+    <Show when={props.item && !props.item.isVectorMatch && matchExcerpt(props.part.text, props.item.match)}>
       {(excerpt) => (
         <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
           <span>{excerpt().before}</span>
           <span style={{ fg: props.theme.warning, bold: true }}>{excerpt().match}</span>
           <span>{excerpt().after}</span>
+        </text>
+      )}
+    </Show>
+    <Show when={props.item?.isVectorMatch && props.item}>
+      {(item) => (
+        <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
+          {item().text.slice(0, 200)}
         </text>
       )}
     </Show>
@@ -334,7 +343,11 @@ const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResul
 const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
   const match = createMemo(() => conversationMatch(props.part.text, props.part.target, props.item.match))
   return (
-    <Show when={match()} fallback={<text fg={props.theme.text}>{props.part.text}</text>}>
+    <Show when={match()} fallback={
+      <text fg={props.item.isVectorMatch ? props.theme.textMuted : props.theme.text}>
+        {props.item.isVectorMatch ? `~ ${props.part.text}` : props.part.text}
+      </text>
+    }>
       {(hit) => (
         <text fg={props.theme.text}>
           <span>{props.part.text.slice(0, hit().start)}</span>
