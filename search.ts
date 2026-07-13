@@ -42,4 +42,5 @@ export {
 // Re-exported path utilities
 export {
   resolveDatabasePath,
+  searchIndexPath,
 } from "./search/db-path.ts"

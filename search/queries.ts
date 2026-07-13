@@ -18,10 +18,15 @@ import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery } 
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
-import { hybridBlend, searchVector, setupVectorTable, configureCustomSQLite } from "./vector.ts"
+import { hybridBlend, searchVector, setupVectorTable, configureCustomSQLite, loadVecExtension } from "./vector.ts"
+
+// Load custom SQLite before any Database() constructor runs,
+// otherwise Database.setCustomSQLite() fails with "SQLite already loaded"
+configureCustomSQLite()
 
 const backgroundIndexRebuilds = new Set<string>()
 const lastVectorRebuildAttempt = new Map<string, number>()
+const vecExtensionLoading = new Map<string, Promise<void>>()
 
 let _db: Database | undefined
 let _dbPath: string | undefined
@@ -285,6 +290,8 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
     }
     if (vecState === "enabled") {
       try {
+        const indexPath = searchIndexPath(dbPath)
+        await vecExtensionLoading.get(indexPath)
         const client = new LlamaEmbeddingClient({
           baseUrl: config.embedBaseUrl,
           model: config.embedModel,
@@ -480,6 +487,7 @@ function ensureSearchIndex(source: Database, sourcePath: string, options?: { reb
     _indexDb = new Database(indexPath)
     _indexDbPath = indexPath
     migrateSearchIndex(_indexDb)
+    vecExtensionLoading.set(indexPath, loadVecExtension(_indexDb).then(() => {}).catch(() => {}))
   }
 
   const state = sourceState(source, sourcePath)

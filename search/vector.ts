@@ -69,6 +69,12 @@ export function searchVector(index: Database, embedding: Float32Array, limit: nu
 }
 
 export function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string) {
+  const dims = getMeta(index, "embedding_dimensions")
+  if (dims) {
+    setMeta(index, "vector_state", "enabled")
+    debug.log("vector:already-indexed", { dimensions: dims })
+    return
+  }
   setMeta(index, "vector_state", "stale")
   rebuildVectorIndex(indexPath, config).catch((err: Error) => {
     debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
@@ -130,8 +136,17 @@ async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
       return
     }
 
-    debug.log("vector:embed:start", { count: docs.length })
-    const embeddings = await client.embedDocuments(docs.map((d) => d.text))
+    const truncate = (text: string) => text.length > 800 ? text.slice(0, 800) : text
+
+    const batchSize = 128
+    const embeddings: Float32Array[] = []
+    debug.log("vector:embed:start", { count: docs.length, batchSize })
+    for (let i = 0; i < docs.length; i += batchSize) {
+      const batch = docs.slice(i, i + batchSize)
+      const batchEmbeddings = await client.embedDocuments(batch.map((d) => truncate(d.text)))
+      embeddings.push(...batchEmbeddings)
+      debug.log("vector:embed:progress", { done: Math.min(i + batchSize, docs.length), total: docs.length })
+    }
     const dims = embeddings[0]?.length
     if (!dims) {
       setMeta(db, "vector_state", "unavailable")
@@ -162,11 +177,11 @@ async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
   }
 }
 
-async function loadVecExtension(db: Database): Promise<boolean> {
+export async function loadVecExtension(db: Database): Promise<boolean> {
   try {
     const sqliteVec = await importPackage("sqlite-vec").catch(() => undefined)
-    if (sqliteVec?.default?.load) {
-      sqliteVec.default.load(db)
+    if (sqliteVec?.load) {
+      sqliteVec.load(db)
       debug.log("vector:extension:loaded", { source: "npm" })
       return true
     }
@@ -190,7 +205,7 @@ async function loadVecExtension(db: Database): Promise<boolean> {
 }
 
 function importPackage(specifier: string) {
-  return new Function("specifier", "return import(specifier)")(specifier) as Promise<{ default?: { load?: (db: Database) => void } }>
+  return new Function("specifier", "return import(specifier)")(specifier) as Promise<{ load?: (db: Database) => void; getLoadablePath?: () => string }>
 }
 
 function parseSemanticConfigForVector(): { disableVector: boolean; sqliteLibPath?: string; sqliteVecExtension?: string; embedBaseUrl: string; embedModel?: string; documentPrefix: string; queryPrefix: string } {
