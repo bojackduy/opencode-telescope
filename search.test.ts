@@ -1,16 +1,20 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
   extractSearchText,
+  ftsQuery,
   hybridBlend,
   loadConversationAfter,
   loadConversationAround,
   loadConversationBefore,
   makeSnippet,
+  parseSemanticConfig,
+  performSearch,
   recentSessionMessages,
+  resolveDatabasePath,
   rowToSearchResult,
   rowToVectorResult,
   searchSessionMessages,
@@ -468,6 +472,93 @@ describe("hybrid search helpers", () => {
   test("hybridBlend handles empty inputs gracefully", () => {
     expect(hybridBlend([], [], 0.45)).toEqual([])
     expect(hybridBlend([], [{ id: "prt_v1", message_id: "msg_1", session_id: "ses_1", session_title: "T", directory: "/d", role: "assistant", time_created: 1, text: "x" } as never], 0.45)).toHaveLength(1)
+  })
+})
+
+describe("parseSemanticConfig", () => {
+  test("uses defaults when env vars are missing", () => {
+    const config = parseSemanticConfig({})
+    expect(config.embedBaseUrl).toBe("http://127.0.0.1:8081")
+    expect(config.disableVector).toBe(false)
+    expect(config.hybridAlpha).toBe(0.45)
+  })
+
+  test("parses env overrides correctly", () => {
+    const config = parseSemanticConfig({
+      OPENCODE_TELESCOPE_EMBED_BASE_URL: "http://localhost:9090",
+      OPENCODE_TELESCOPE_DISABLE_VECTOR: "1",
+      OPENCODE_TELESCOPE_HYBRID_ALPHA: "0.7",
+      OPENCODE_TELESCOPE_EMBED_MODEL: "custom-model",
+    })
+    expect(config.embedBaseUrl).toBe("http://localhost:9090")
+    expect(config.disableVector).toBe(true)
+    expect(config.hybridAlpha).toBe(0.7)
+    expect(config.embedModel).toBe("custom-model")
+  })
+
+  test("clamps hybridAlpha to [0, 1]", () => {
+    expect(parseSemanticConfig({ OPENCODE_TELESCOPE_HYBRID_ALPHA: "-1" }).hybridAlpha).toBe(0)
+    expect(parseSemanticConfig({ OPENCODE_TELESCOPE_HYBRID_ALPHA: "2" }).hybridAlpha).toBe(1)
+    expect(parseSemanticConfig({ OPENCODE_TELESCOPE_HYBRID_ALPHA: "invalid" }).hybridAlpha).toBe(0.45)
+  })
+})
+
+describe("ftsQuery", () => {
+  test("builds FTS5 query with AND and prefix wildcards", () => {
+    expect(ftsQuery("hello world")).toBe(`"hello"* AND "world"*`)
+  })
+
+  test("sanitizes special FTS5 characters", () => {
+    expect(ftsQuery(`test"quote`)).toBe(`"test quote"*`)
+    expect(ftsQuery(`star*s:fun`)).toBe(`"star s fun"*`)
+    expect(ftsQuery("with (parens)")).toBe(`"with"* AND "parens"*`)
+  })
+
+  test("returns empty for blank query", () => {
+    expect(ftsQuery("")).toBe("")
+    expect(ftsQuery("   ")).toBe("")
+  })
+})
+
+describe("resolveDatabasePath", () => {
+  const originalEnv = process.env
+
+  afterEach(() => {
+    process.env = originalEnv
+  })
+
+  test("uses OPENCODE_DB absolute path directly", () => {
+    process.env = { ...originalEnv, OPENCODE_DB: "/custom/path/opencode.db" }
+    expect(resolveDatabasePath()).toBe("/custom/path/opencode.db")
+  })
+
+  test("returns cached path on second call", () => {
+    process.env = { ...originalEnv, OPENCODE_DB: "/cached/test.db" }
+    const first = resolveDatabasePath()
+    const second = resolveDatabasePath()
+    expect(first).toBe(second)
+  })
+})
+
+describe("performSearch", () => {
+  test("returns empty for blank query", async () => {
+    const results = await performSearch("", { limit: 10 })
+    expect(results).toEqual([])
+  })
+})
+
+describe("hybrid search edge cases", () => {
+  test("hybridBlend normalizes scores correctly", () => {
+    const keyword = [
+      { id: "k1", message_id: "m1", session_id: "s1", session_title: "T", directory: "/d", role: "assistant", part_type: "text", time_created: 1, text: "a" },
+      { id: "k2", message_id: "m2", session_id: "s1", session_title: "T", directory: "/d", role: "assistant", part_type: "text", time_created: 2, text: "b" },
+    ]
+    const vector: never[] = []
+    const result = hybridBlend(keyword as never, vector, 0.45)
+    expect(result).toHaveLength(2)
+    expect(result[0]!.keywordScore).toBeGreaterThanOrEqual(result[1]!.keywordScore)
+    expect(result[0]!.score).toBeGreaterThan(0)
+    expect(result[1]!.score).toBeGreaterThanOrEqual(0)
   })
 })
 
