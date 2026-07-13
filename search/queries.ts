@@ -279,9 +279,9 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
         try {
           const healthy = await probeClient.health()
           if (healthy) {
-            setupVectorTable(index, config, indexPath)
+            await setupVectorTable(index, config, indexPath)
             lastVectorRebuildAttempt.set(indexPath, Date.now())
-            vecState = "stale"
+            vecState = getMeta(index, "vector_state") ?? "stale"
           }
         } catch {
           vecState = "unavailable"
@@ -655,7 +655,7 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
   if (config.disableVector) {
     setMeta(index, "vector_state", "disabled")
   } else {
-    setupVectorTable(index, config, searchIndexPath(sourcePath))
+    void setupVectorTable(index, config, searchIndexPath(sourcePath))
   }
 }
 

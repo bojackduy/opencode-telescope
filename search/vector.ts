@@ -68,7 +68,7 @@ export function searchVector(index: Database, embedding: Float32Array, limit: nu
   `).all(embedding, k)
 }
 
-export function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string) {
+export async function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string): Promise<void> {
   const dims = getMeta(index, "embedding_dimensions")
   if (dims) {
     setMeta(index, "vector_state", "enabled")
@@ -76,9 +76,11 @@ export function setupVectorTable(index: Database, config: SemanticConfig, indexP
     return
   }
   setMeta(index, "vector_state", "stale")
-  rebuildVectorIndex(indexPath, config).catch((err: Error) => {
+  try {
+    await rebuildVectorIndex(indexPath, config)
+  } catch (err) {
     debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
-  })
+  }
 }
 
 let customSQLiteConfigured = false
