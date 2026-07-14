@@ -654,8 +654,6 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
 
   if (config.disableVector) {
     setMeta(index, "vector_state", "disabled")
-  } else {
-    void setupVectorTable(index, config, searchIndexPath(sourcePath))
   }
 }
 
