@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-telescope",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "description": "OpenCode TUI plugin for fuzzy and semantic search across local conversation history, session transcripts, and AI coding chats",
   "type": "module",
   "license": "MIT",
