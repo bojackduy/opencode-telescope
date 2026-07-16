@@ -54,6 +54,7 @@
     "tui.tsx",
     "telescope.tsx",
     "search.ts",
+    "search-worker.ts",
     "search",
     "components",
     "ui",

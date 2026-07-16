@@ -97,10 +97,22 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let searchTimer: ReturnType<typeof setTimeout> | undefined
+  let searchWatchdogTimer: ReturnType<typeof setTimeout> | undefined
   let lastFiredQuery = ""
   let searchRequestId = 0
+  let fallbackSearchRequestId: number | undefined
   let searchWorker: Worker | undefined
   const SEARCH_DEBOUNCE_MS = 200
+  const SEARCH_WORKER_TIMEOUT_MS = 3000
+  type SearchRequest = {
+    id: number
+    q: string
+    role: SearchRole | undefined
+    db: string
+    dir: string
+    limit: number
+  }
+  let pendingSearchRequest: SearchRequest | undefined
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
     id: number
@@ -133,6 +145,60 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
   }
+  const clearSearchWatchdog = () => {
+    if (searchWatchdogTimer) clearTimeout(searchWatchdogTimer)
+    searchWatchdogTimer = undefined
+  }
+  const commitSearchBatch = (request: SearchRequest, batch: SearchResult[], source: string) => {
+    if (request.id !== searchRequestId) return
+    clearSearchWatchdog()
+    if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
+    pendingSearchRequest = undefined
+    debug.log("bootstrap:search:done", { rows: batch.length, limit: request.limit, mode: searchMode(), source })
+    solidBatch(() => {
+      setResults(batch)
+      setResultBaseOffset(0)
+      setNextResultOffset(batch.length)
+      setHasMore(batch.length >= request.limit)
+      setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= request.limit, pageSize: request.limit, lastOffset: 0, lastAdded: batch.length })
+      setSelected(0)
+    })
+    setBusy(false)
+    setLoading(false)
+    debug.timeEnd("query:search")
+  }
+  const failSearch = (request: SearchRequest, error: string) => {
+    if (request.id !== searchRequestId) return
+    clearSearchWatchdog()
+    if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
+    pendingSearchRequest = undefined
+    debug.log("bootstrap:search:error", error)
+    solidBatch(() => {
+      setResults([])
+      setResultBaseOffset(0)
+      setNextResultOffset(0)
+      setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: request.limit, lastOffset: 0, lastAdded: 0 })
+    })
+    setError(error)
+    setBusy(false)
+    setLoading(false)
+    debug.timeEnd("query:search")
+  }
+  const runSearchFallback = async (request: SearchRequest, reason: string) => {
+    if (request.id !== searchRequestId) return
+    if (fallbackSearchRequestId === request.id) return
+    fallbackSearchRequestId = request.id
+    clearSearchWatchdog()
+    debug.log("bootstrap:search:fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
+    try {
+      const batch = request.q
+        ? searchSessionMessages(request.q, { limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
+        : recentSessionMessages({ limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
+      commitSearchBatch(request, batch, `fallback:${reason}`)
+    } catch (err) {
+      failSearch(request, err instanceof Error ? err.message : String(err))
+    }
+  }
   const ensureSearchWorker = () => {
     if (searchWorker) return true
     try {
@@ -141,38 +207,23 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         const msg = event.data
         if (msg.type === "search-result") {
           if (msg.id !== searchRequestId) return
-          const batch = msg.result
-          const limit = msg.limit
-          debug.log("bootstrap:search:done", { rows: batch.length, limit, mode: searchMode() })
-          solidBatch(() => {
-            setResults(batch)
-            setResultBaseOffset(0)
-            setNextResultOffset(batch.length)
-            setHasMore(batch.length >= limit)
-            setResultPageInfo({ loadedUntil: batch.length, hasMore: batch.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: batch.length })
-            setSelected(0)
-          })
-          setBusy(false)
-          setLoading(false)
-          debug.timeEnd("query:search")
+          const request = pendingSearchRequest
+          if (!request || request.id !== msg.id) return
+          commitSearchBatch(request, msg.result, "worker")
         }
         if (msg.type === "error") {
           if (msg.id !== searchRequestId) return
-          debug.log("bootstrap:search:error", msg.error)
-          solidBatch(() => {
-            setResults([])
-            setResultBaseOffset(0)
-            setNextResultOffset(0)
-            setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: 0, lastOffset: 0, lastAdded: 0 })
-          })
-          setError(msg.error)
-          setBusy(false)
-          setLoading(false)
-          debug.timeEnd("query:search")
+          const request = pendingSearchRequest
+          if (!request || request.id !== msg.id) return
+          runSearchFallback(request, `worker-message:${msg.error}`)
         }
       }
       searchWorker.onerror = (err) => {
         debug.log("worker:error", err.message)
+        const request = pendingSearchRequest
+        searchWorker?.terminate()
+        searchWorker = undefined
+        if (request) runSearchFallback(request, `worker-error:${err.message}`)
       }
       return true
     } catch (err) {
@@ -184,6 +235,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
     if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
+    clearSearchWatchdog()
     cancelPreviewPrefetch()
     searchWorker?.terminate()
     searchWorker = undefined
@@ -273,14 +325,26 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setSearchMode(detectSearchMode())
     debug.time("query:search")
     const id = ++searchRequestId
+    fallbackSearchRequestId = undefined
+    const request: SearchRequest = { id, q, role, db, dir, limit }
+    pendingSearchRequest = request
     if (!ensureSearchWorker()) {
-      debug.timeEnd("query:search")
+      runSearchFallback(request, "worker-create-failed")
       return
     }
     const msg = q
       ? { type: "search" as const, id, query: q, limit, offset: 0, directory: dir, role, dbPath: db }
       : { type: "recent" as const, id, limit, offset: 0, directory: dir, role, dbPath: db }
     debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)", worker: true })
+    clearSearchWatchdog()
+    searchWatchdogTimer = setTimeout(() => {
+      if (request.id !== searchRequestId) return
+      debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
+      searchWorker?.terminate()
+      searchWorker = undefined
+      runSearchFallback(request, "worker-timeout")
+    }, SEARCH_WORKER_TIMEOUT_MS)
+    ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
     searchWorker!.postMessage(msg)
   }
 
