@@ -68,19 +68,35 @@ export function searchVector(index: Database, embedding: Float32Array, limit: nu
   `).all(embedding, k)
 }
 
-export async function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string): Promise<void> {
+const vectorRebuilds = new Map<string, Promise<void>>()
+
+export function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string): void {
   const dims = getMeta(index, "embedding_dimensions")
   if (dims) {
     setMeta(index, "vector_state", "enabled")
     debug.log("vector:already-indexed", { dimensions: dims })
     return
   }
-  setMeta(index, "vector_state", "stale")
-  try {
-    await rebuildVectorIndex(indexPath, config)
-  } catch (err) {
-    debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
+  if (vectorRebuilds.has(indexPath)) {
+    setMeta(index, "vector_state", "stale")
+    debug.log("vector:rebuild:already-running", { indexPath })
+    return
   }
+
+  setMeta(index, "vector_state", "stale")
+  const rebuild = new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      rebuildVectorIndex(indexPath, config)
+        .catch((err) => {
+          debug.log("vector:rebuild:error", err instanceof Error ? err.message : String(err))
+        })
+        .finally(resolve)
+    }, 1)
+    ;(timer as { unref?: () => void }).unref?.()
+  }).finally(() => {
+    vectorRebuilds.delete(indexPath)
+  })
+  vectorRebuilds.set(indexPath, rebuild)
 }
 
 let customSQLiteConfigured = false

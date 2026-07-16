@@ -270,22 +270,9 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
       const indexPath = searchIndexPath(dbPath)
       const lastAttempt = lastVectorRebuildAttempt.get(indexPath)
       if (!lastAttempt || Date.now() - lastAttempt > 30_000) {
-        const probeClient = new LlamaEmbeddingClient({
-          baseUrl: config.embedBaseUrl,
-          model: config.embedModel,
-          documentPrefix: config.documentPrefix,
-          queryPrefix: config.queryPrefix,
-        })
-        try {
-          const healthy = await probeClient.health()
-          if (healthy) {
-            await setupVectorTable(index, config, indexPath)
-            lastVectorRebuildAttempt.set(indexPath, Date.now())
-            vecState = getMeta(index, "vector_state") ?? "stale"
-          }
-        } catch {
-          vecState = "unavailable"
-        }
+        setupVectorTable(index, config, indexPath)
+        lastVectorRebuildAttempt.set(indexPath, Date.now())
+        vecState = getMeta(index, "vector_state") ?? "stale"
       }
     }
     if (vecState === "stale" && getMeta(index, "embedding_dimensions")) {

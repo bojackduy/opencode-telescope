@@ -19,7 +19,7 @@ export class LlamaEmbeddingClient {
   async health() {
     for (const endpoint of ["/health", "/v1/health"]) {
       try {
-        const response = await fetch(new URL(endpoint, this.config.baseUrl))
+        const response = await fetch(new URL(endpoint, this.config.baseUrl), { signal: AbortSignal.timeout(1000) })
         if (response.ok) return true
       } catch {
         continue
@@ -39,6 +39,7 @@ export class LlamaEmbeddingClient {
   private async embed(inputs: string[]) {
     const response = await fetch(new URL("/v1/embeddings", this.config.baseUrl), {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: this.config.model ?? "local-embedding",
