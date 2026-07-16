@@ -32,6 +32,7 @@ export {
   makeSnippet,
   extractSearchText,
   ftsQuery,
+  expandQuery,
 } from "./search/text.ts"
 
 // Re-exported vector/blend functions

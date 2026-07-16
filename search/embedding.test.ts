@@ -20,18 +20,18 @@ describe("LlamaEmbeddingClient", () => {
 
   test("embedQuery prefixes with query prefix", async () => {
     const inputs: string[] = []
-    globalThis.fetch = async (url: RequestInfo | URL) => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
       if (typeof url === "string" && url.includes("/v1/embeddings")) {
         inputs.push("called")
       }
       return new Response(null, { status: 500 })
-    }
+    }) as unknown as typeof fetch
 
     await expect(client.embedQuery("test query")).rejects.toThrow()
   })
 
   test("embedDocuments prefixes with document prefix", async () => {
-    globalThis.fetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}")
       expect(body.input).toEqual(["search_document: doc1", "search_document: doc2"])
       return new Response(JSON.stringify({
@@ -40,7 +40,7 @@ describe("LlamaEmbeddingClient", () => {
           { index: 1, embedding: [0.4, 0.5, 0.6] },
         ],
       }), { status: 200 })
-    }
+    }) as unknown as typeof fetch
 
     const result = await client.embedDocuments(["doc1", "doc2"])
     expect(result).toHaveLength(2)
@@ -50,11 +50,11 @@ describe("LlamaEmbeddingClient", () => {
   })
 
   test("embedQuery returns single vector", async () => {
-    globalThis.fetch = async () => {
+    globalThis.fetch = (async () => {
       return new Response(JSON.stringify({
         data: [{ index: 0, embedding: [0.5, 0.5] }],
       }), { status: 200 })
-    }
+    }) as unknown as typeof fetch
 
     const result = await client.embedQuery("hello")
     expect(result).toBeInstanceOf(Float32Array)
@@ -62,21 +62,21 @@ describe("LlamaEmbeddingClient", () => {
   })
 
   test("rejects non-array embedding", async () => {
-    globalThis.fetch = async () => {
+    globalThis.fetch = (async () => {
       return new Response(JSON.stringify({
         data: [{ index: 0, embedding: "not-an-array" }],
       }), { status: 200 })
-    }
+    }) as unknown as typeof fetch
 
     await expect(client.embedQuery("test")).rejects.toThrow()
   })
 
   test("rejects embedding with non-finite values", async () => {
-    globalThis.fetch = async () => {
+    globalThis.fetch = (async () => {
       return new Response(JSON.stringify({
         data: [{ index: 0, embedding: [1, "not-a-number", 3] }],
       }), { status: 200 })
-    }
+    }) as unknown as typeof fetch
 
     await expect(client.embedQuery("test")).rejects.toThrow()
   })

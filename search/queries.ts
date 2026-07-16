@@ -14,7 +14,7 @@ import type {
   Row,
   SemanticConfig,
 } from "./types.ts"
-import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery } from "./text.ts"
+import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery, expandQuery } from "./text.ts"
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
@@ -311,9 +311,10 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
           documentPrefix: config.documentPrefix,
           queryPrefix: config.queryPrefix,
         })
-        const embedding = await client.embedQuery(term)
+        const embedTerm = expandQuery(term)
+        const embedding = await client.embedQuery(embedTerm)
         vector = searchVector(index, embedding, limit)
-        debug.log("query:vector:results", { count: vector.length })
+        debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== term ? embedTerm : undefined })
       } catch (err) {
         debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
       }
@@ -341,7 +342,7 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
     }
   }
 
-  return results
+  return results.slice(0, limit)
 }
 
 function searchRows(db: Database, dbPath: string, query: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {

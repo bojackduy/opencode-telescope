@@ -303,3 +303,46 @@ function truncate(value: string, length: number) {
   if (value.length <= length) return value
   return `${value.slice(0, length - 3)}...`
 }
+
+const synonymMap: Record<string, string[]> = {
+  greeting: ["hello", "hi", "hey", "howdy", "greetings", "good morning", "good afternoon", "good evening"],
+  hello: ["hi", "hey", "howdy", "greeting", "greetings"],
+  hi: ["hello", "hey", "howdy", "greeting"],
+  hey: ["hello", "hi", "howdy", "greeting"],
+  thanks: ["thank you", "thx", "ty", "appreciate", "grateful"],
+  goodbye: ["bye", "see you", "farewell", "later", "cya"],
+  bye: ["goodbye", "see you", "farewell", "later"],
+  error: ["bug", "issue", "failed", "failure", "problem", "exception"],
+  bug: ["error", "issue", "problem", "defect"],
+  fix: ["repair", "patch", "resolve", "correct", "solve", "bugfix"],
+  help: ["assist", "support", "guide", "how to", "tutorial"],
+  explain: ["describe", "clarify", "elaborate", "what is", "how does"],
+  code: ["program", "source", "implementation", "script", "function"],
+  test: ["spec", "unit test", "assertion", "verify", "check"],
+  refactor: ["restructure", "rewrite", "improve", "reorganize", "clean up"],
+  optimize: ["improve", "speed up", "performance", "efficient", "fast"],
+  config: ["configuration", "setting", "option", "setup"],
+  deploy: ["release", "publish", "ship", "rollout", "launch"],
+  security: ["auth", "permission", "access", "vulnerability", "secure"],
+  database: ["db", "sql", "query", "schema", "storage", "persist"],
+}
+
+export function expandQuery(query: string): string {
+  const trimmed = query.trim()
+  const tokens = trimmed.toLowerCase().split(/\s+/).filter(Boolean)
+  if (tokens.length > 1) return trimmed
+  const word = tokens[0]
+  if (!word) return trimmed
+  const synonyms = synonymMap[word]
+  if (!synonyms) return trimmed
+  const seen = new Set([word])
+  const expanded = [trimmed]
+  for (const syn of synonyms) {
+    const key = syn.toLowerCase()
+    if (!seen.has(key)) {
+      expanded.push(syn)
+      seen.add(key)
+    }
+  }
+  return expanded.join(" ")
+}

@@ -4,7 +4,7 @@ import { checkEmbeddingServer, checkSqliteVec, checkCustomSqlite } from "./depen
 describe("dependency checks", () => {
   test("checkEmbeddingServer returns unavailable when fetch fails", async () => {
     const originalFetch = globalThis.fetch
-    globalThis.fetch = async () => { throw new Error("fetch failed") }
+    globalThis.fetch = (async () => { throw new Error("fetch failed") }) as unknown as typeof fetch
     try {
       const result = await checkEmbeddingServer("http://localhost:1")
       expect(result.state).toBe("unavailable")

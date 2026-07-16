@@ -59,8 +59,8 @@ describe("format utils", () => {
   })
 
   test("roleColor returns correct colors", () => {
-    expect(roleColor("assistant", mockTheme as never)).toBe(mockTheme.info)
-    expect(roleColor("user", mockTheme as never)).toBe(mockTheme.primary)
+    expect(roleColor("assistant", mockTheme as never)).toBe(mockTheme.info as never)
+    expect(roleColor("user", mockTheme as never)).toBe(mockTheme.primary as never)
   })
 
   test("toolIcon returns correct symbols", () => {

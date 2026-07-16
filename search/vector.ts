@@ -7,7 +7,7 @@ import { debug } from "../ui/debug.ts"
 
 export function hybridBlend(keyword: Row[], vector: Row[], alpha: number): ScoredRow[] {
   const merged = new Map<string, ScoredRow>()
-  const defaultScore = 1 / Math.max(keyword.length, 1)
+  const defaultScore = 0.5
 
   for (const [i, row] of keyword.entries()) {
     merged.set(row.id, {
