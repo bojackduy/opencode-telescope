@@ -342,7 +342,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
       searchWorker?.terminate()
       searchWorker = undefined
-      runSearchFallback(request, "worker-timeout")
+      failSearch(request, "Search worker timed out. The conversation index may still be building; try again shortly.")
     }, SEARCH_WORKER_TIMEOUT_MS)
     ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
     searchWorker!.postMessage(msg)

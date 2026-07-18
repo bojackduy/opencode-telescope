@@ -59,10 +59,9 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
   const limit = options?.limit ?? 40
   const indexed = dbPath === ":memory:" ? undefined : indexedRecentRows(db, dbPath, limit, options?.directory, options?.offset, options?.role)
   if (indexed) return indexed.flatMap((row) => rowToSearchResult(row, "") ?? [])
-  debug.log("query:recent:source-fallback", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
-  return visibleTextRows(db, limit, undefined, options?.directory, options?.offset, options?.role).flatMap(
-    (row) => rowToSearchResult(row, "") ?? [],
-  )
+  if (dbPath !== ":memory:") scheduleBackgroundIndexRebuild(dbPath)
+  debug.log("query:recent:index-pending", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
+  return []
 }
 
 export function loadConversationAround(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }): ConversationPreviewPage {
@@ -404,6 +403,7 @@ function indexedRecentRows(db: Database, dbPath: string, limit: number, director
         expectedDataVersion: state.dataVersion,
         actualDataVersion: currentDataVersion,
       })
+      scheduleBackgroundIndexRebuild(dbPath)
     }
 
     const conditions: string[] = ["part_type = 'text'"]

@@ -341,6 +341,7 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_2", "msg_2", "ses_1", 2, JSON.stringify({ type: "text", text: "user text" }))
 
+      searchSessionMessages("text", { dbPath, limit: 10 })
       expect(recentSessionMessages({ dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2", "prt_1"])
       expect(recentSessionMessages({ dbPath, limit: 10, role: "user" }).map((item) => item.id)).toEqual(["prt_2"])
       expect(recentSessionMessages({ dbPath, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_1"])
@@ -424,6 +425,28 @@ describe("session search helpers", () => {
       expect(around.parts[0]?.tool).toBe("apply_patch")
       expect(around.parts[0]?.text).toContain("previewPatchNeedle")
       expect(around.parts[0]?.state?.metadata).toBeDefined()
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("recent messages returns immediately while sidecar index is pending", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-recent-pending-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "assistant text" }))
+
+      expect(recentSessionMessages({ dbPath, limit: 10 })).toEqual([])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
