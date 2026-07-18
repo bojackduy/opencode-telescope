@@ -98,7 +98,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let searchTimer: ReturnType<typeof setTimeout> | undefined
   let searchWatchdogTimer: ReturnType<typeof setTimeout> | undefined
-  let lastFiredQuery = ""
+  let lastFiredSearchKey = ""
   let searchRequestId = 0
   let fallbackSearchRequestId: number | undefined
   let searchWorker: Worker | undefined
@@ -309,8 +309,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     return config.disableVector ? "keyword" as const : "hybrid" as const
   }
 
+  const searchKey = (q: string, role: SearchRole | undefined, db: string, dir: string) =>
+    JSON.stringify([q, role ?? null, db, dir])
+
   const executeSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
-    lastFiredQuery = q
+    lastFiredSearchKey = searchKey(q, role, db, dir)
     const limit = q ? Math.min(searchBatchSize(), 80) : recentBatchSize()
     setError("")
     setHasMore(true)
@@ -350,7 +353,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
   const scheduleSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
     if (searchTimer) clearTimeout(searchTimer)
-    if (q === lastFiredQuery && results().length > 0) return
+    if (searchKey(q, role, db, dir) === lastFiredSearchKey) return
     searchTimer = setTimeout(() => {
       searchTimer = undefined
       executeSearch(q, role, db, dir)

@@ -58,10 +58,14 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
   const db = getDb(dbPath)
   const limit = options?.limit ?? 40
   const indexed = dbPath === ":memory:" ? undefined : indexedRecentRows(db, dbPath, limit, options?.directory, options?.offset, options?.role)
-  if (indexed) return indexed.flatMap((row) => rowToSearchResult(row, "") ?? [])
+  if (indexed && !indexed.stale && indexed.rows.length > 0) return indexed.rows.flatMap((row) => rowToSearchResult(row, "") ?? [])
+
   if (dbPath !== ":memory:") scheduleBackgroundIndexRebuild(dbPath)
-  debug.log("query:recent:index-pending", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
-  return []
+  if (!indexed) debug.log("query:recent:index-pending", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
+
+  const sourceRows = sourceRecentRows(db, limit, options?.directory, options?.offset, options?.role)
+  if (sourceRows) return sourceRows.flatMap((row) => rowToSearchResult(row, "") ?? [])
+  return indexed?.rows.flatMap((row) => rowToSearchResult(row, "") ?? []) ?? []
 }
 
 export function loadConversationAround(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }): ConversationPreviewPage {
@@ -378,7 +382,12 @@ function indexedTextRows(db: Database, dbPath: string, limit: number, query: str
   }
 }
 
-function indexedRecentRows(db: Database, dbPath: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+type IndexedRecentRows = {
+  rows: Row[]
+  stale: boolean
+}
+
+function indexedRecentRows(db: Database, dbPath: string, limit: number, directory?: string, offset?: number, role?: SearchRole): IndexedRecentRows | undefined {
   try {
     const index = ensureSearchIndex(db, dbPath, { rebuild: false, useStale: true })
     if (!index) {
@@ -389,7 +398,7 @@ function indexedRecentRows(db: Database, dbPath: string, limit: number, director
     const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_index").get()?.count ?? 0
     if (rowCount === 0) {
       debug.log("query:recent:index:empty", { dbPath })
-      return
+      return { rows: [], stale: true }
     }
 
     const state = sourceState(db, dbPath)
@@ -397,7 +406,8 @@ function indexedRecentRows(db: Database, dbPath: string, limit: number, director
     const currentMtimeMs = getMeta(index, "source_mtime_ms")
     const currentPath = getMeta(index, "source_path")
     const currentIndexVersion = getMeta(index, "index_version")
-    if (currentPath !== dbPath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
+    const stale = currentPath !== dbPath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION
+    if (stale) {
       debug.log("query:recent:index:stale", {
         dbPath,
         expectedDataVersion: state.dataVersion,
@@ -431,9 +441,20 @@ function indexedRecentRows(db: Database, dbPath: string, limit: number, director
       LIMIT ? ${offsetClause}
     `).all(...params as any[])
     debug.timeEnd("query:recent:index:exec")
-    return rows
+    return { rows, stale }
   } catch (err) {
     debug.log("recent:index:fallback", err instanceof Error ? err.message : String(err))
+    return
+  }
+}
+
+function sourceRecentRows(db: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+  try {
+    if (!tableExists(db, "part") || !tableExists(db, "message") || !tableExists(db, "session")) return []
+    debug.log("query:recent:source-fallback", { limit, offset: offset ?? 0, directory, role })
+    return visibleTextRows(db, limit, undefined, directory, offset, role)
+  } catch (err) {
+    debug.log("query:recent:source-fallback:error", err instanceof Error ? err.message : String(err))
     return
   }
 }

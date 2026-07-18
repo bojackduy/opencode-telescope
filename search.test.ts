@@ -431,7 +431,7 @@ describe("session search helpers", () => {
     }
   })
 
-  test("recent messages returns immediately while sidecar index is pending", () => {
+  test("recent messages falls back to source rows while sidecar index is pending", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-recent-pending-"))
     const dbPath = path.join(dir, "opencode.db")
     const db = new Database(dbPath)
@@ -446,7 +446,38 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "assistant text" }))
 
-      expect(recentSessionMessages({ dbPath, limit: 10 })).toEqual([])
+      expect(recentSessionMessages({ dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_1"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("recent messages falls back to source rows when sidecar misses active directory", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-recent-stale-dir-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const oldDir = path.join(dir, "old")
+    const currentDir = path.join(dir, "current")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_old", "Old", oldDir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_old", "ses_old", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_old", "msg_old", "ses_old", 1, JSON.stringify({ type: "text", text: "old indexed text" }))
+
+      expect(searchSessionMessages("old", { dbPath, directory: oldDir, limit: 10 }).map((item) => item.id)).toEqual(["prt_old"])
+
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_current", "Current", currentDir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_current", "ses_current", JSON.stringify({ role: "user" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_current", "msg_current", "ses_current", 2, JSON.stringify({ type: "text", text: "current source text" }))
+
+      expect(recentSessionMessages({ dbPath, directory: currentDir, limit: 10 }).map((item) => item.id)).toEqual(["prt_current"])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
