@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { Show } from "solid-js"
-import type { SearchResult } from "../search.ts"
+import type { KeywordIndexState, SearchResult } from "../search.ts"
 import { compactTime, roleColor, roleLabel, truncate } from "../ui/format.ts"
 
 export const ResultRow = (props: {
@@ -59,11 +59,18 @@ export const ResultRow = (props: {
   </box>
 )
 
-export const EmptyState = (props: { query: string; owner: string; theme: TuiThemeCurrent }) => (
+export const EmptyState = (props: { query: string; owner: string; theme: TuiThemeCurrent; keywordIndexState?: KeywordIndexState }) => (
   <box paddingLeft={1} paddingTop={1}>
-    <text fg={props.theme.textMuted}>{props.query.trim() ? `No matching ${props.owner} conversation text.` : `No recent ${props.owner} conversation text found.`}</text>
+    <text fg={props.theme.textMuted}>{emptyMessage(props.query, props.owner, props.keywordIndexState)}</text>
   </box>
 )
+
+function emptyMessage(query: string, owner: string, keywordIndexState?: KeywordIndexState) {
+  if (keywordIndexState === "indexing" || keywordIndexState === "missing" || keywordIndexState === "empty") return "Indexing conversations in background..."
+  if (keywordIndexState === "stale") return "Updating conversation index..."
+  if (keywordIndexState === "error") return "Conversation index is unavailable. Try reopening Telescope."
+  return query.trim() ? `No matching ${owner} conversation text.` : `No recent ${owner} conversation text found.`
+}
 
 export const SkeletonRow = (props: { theme: TuiThemeCurrent }) => (
   <box

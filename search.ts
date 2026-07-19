@@ -7,7 +7,9 @@ export type {
   ConversationPreviewCursor,
   ToolState,
   SemanticConfig,
+  KeywordIndexState,
   VectorState,
+  SearchResponse,
   DocumentRow,
   ScoredRow,
   HybridSearchOptions,
@@ -16,13 +18,21 @@ export type {
 // Re-exported query functions
 export {
   searchSessionMessages,
+  searchSessionMessagesWithStatus,
   recentSessionMessages,
+  recentSessionMessagesWithStatus,
   loadConversationAround,
   loadConversationBefore,
   loadConversationAfter,
   performSearch,
+  performSearchWithStatus,
   semanticSearchSessionMessages,
+  semanticSearchSessionMessagesWithStatus,
   parseSemanticConfig,
+  openSearchIndex,
+  readKeywordIndexState,
+  rebuildKeywordIndex,
+  rebuildKeywordIndexForDbPath,
 } from "./search/queries.ts"
 
 // Re-exported text/snippet functions

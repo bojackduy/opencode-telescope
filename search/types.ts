@@ -70,7 +70,16 @@ export type SemanticConfig = {
   queryPrefix: string
 }
 
-export type VectorState = "enabled" | "disabled" | "unavailable" | "stale"
+export type KeywordIndexState = "ready" | "stale" | "missing" | "empty" | "indexing" | "error"
+
+export type VectorState = "enabled" | "disabled" | "unavailable" | "stale" | "indexing"
+
+export type SearchResponse = {
+  results: SearchResult[]
+  keywordState: KeywordIndexState
+  vectorState?: VectorState
+  stale: boolean
+}
 
 export type ScoredRow = Row & {
   score: number

@@ -5,6 +5,8 @@ export const DOCUMENT_EXTRACTOR_VERSION = "1"
 
 export function migrateSearchIndex(db: Database) {
   db.exec(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 1000;
     CREATE TABLE IF NOT EXISTS index_meta(
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL

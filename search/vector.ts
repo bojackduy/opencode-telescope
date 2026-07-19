@@ -68,6 +68,17 @@ export function searchVector(index: Database, embedding: Float32Array, limit: nu
   `).all(embedding, k)
 }
 
+export function isVectorReady(index: Database) {
+  if (getMeta(index, "vector_state") !== "enabled") return false
+  if (!getMeta(index, "embedding_dimensions")) return false
+  try {
+    index.query("SELECT 1 FROM document_vec LIMIT 1").get()
+    return true
+  } catch {
+    return false
+  }
+}
+
 const vectorRebuilds = new Map<string, Promise<void>>()
 
 export function setupVectorTable(index: Database, config: SemanticConfig, indexPath: string): void {

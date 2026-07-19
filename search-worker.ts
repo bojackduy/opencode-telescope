@@ -1,4 +1,4 @@
-import { performSearch, recentSessionMessages } from "./search"
+import { performSearchWithStatus, recentSessionMessagesWithStatus } from "./search"
 
 let activeId = -1
 
@@ -7,15 +7,15 @@ self.onmessage = async (event: MessageEvent) => {
   if (msg.type === "search" || msg.type === "recent") {
     activeId = msg.id
     try {
-      const batch = msg.type === "search"
-        ? await performSearch(msg.query, {
+      const response = msg.type === "search"
+        ? await performSearchWithStatus(msg.query, {
             limit: msg.limit,
             offset: msg.offset ?? 0,
             dbPath: msg.dbPath,
             directory: msg.directory,
             role: msg.role,
           })
-        : recentSessionMessages({
+        : recentSessionMessagesWithStatus({
             limit: msg.limit,
             offset: msg.offset ?? 0,
             dbPath: msg.dbPath,
@@ -23,7 +23,7 @@ self.onmessage = async (event: MessageEvent) => {
             role: msg.role,
           })
       if (msg.id === activeId) {
-        self.postMessage({ type: "search-result", id: msg.id, result: batch, limit: msg.limit })
+        self.postMessage({ type: "search-result", id: msg.id, result: response.results, limit: msg.limit, keywordState: response.keywordState, vectorState: response.vectorState, stale: response.stale })
       }
     } catch (err) {
       if (msg.id === activeId) {

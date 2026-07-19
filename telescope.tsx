@@ -12,11 +12,15 @@ import {
   parseSemanticConfig,
   performSearch,
   recentSessionMessages,
+  recentSessionMessagesWithStatus,
   resolveDatabasePath,
   searchSessionMessages,
+  searchSessionMessagesWithStatus,
   type ConversationPreviewPart,
+  type KeywordIndexState,
   type SearchResult,
   type SearchRole,
+  type VectorState,
 } from "./search.ts"
 import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
@@ -38,6 +42,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal("")
   const [searchMode, setSearchMode] = createSignal<"keyword" | "hybrid">("keyword")
+  const [keywordIndexState, setKeywordIndexState] = createSignal<KeywordIndexState>("missing")
+  const [vectorState, setVectorState] = createSignal<VectorState | undefined>()
   const [mode, setMode] = createSignal<"normal" | "insert">("normal")
   const [loading, setLoading] = createSignal(true)
   const [hasMore, setHasMore] = createSignal(true)
@@ -102,6 +108,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let searchRequestId = 0
   let fallbackSearchRequestId: number | undefined
   let searchWorker: Worker | undefined
+  let indexWorker: Worker | undefined
+  let indexJobId = 0
+  const activeIndexJobs = new Set<string>()
   const SEARCH_DEBOUNCE_MS = 200
   const SEARCH_WORKER_TIMEOUT_MS = 3000
   type SearchRequest = {
@@ -184,6 +193,17 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoading(false)
     debug.timeEnd("query:search")
   }
+  const settleSearchAsIndexing = (request: SearchRequest, reason: string) => {
+    if (request.id !== searchRequestId) return
+    clearSearchWatchdog()
+    pendingSearchRequest = undefined
+    debug.log("bootstrap:search:indexing", { reason, query: request.q || "(all recent)", limit: request.limit })
+    setKeywordIndexState("indexing")
+    requestIndexRebuild(request.db, "stale")
+    setBusy(false)
+    setLoading(false)
+    debug.timeEnd("query:search")
+  }
   const runSearchFallback = async (request: SearchRequest, reason: string) => {
     if (request.id !== searchRequestId) return
     if (fallbackSearchRequestId === request.id) return
@@ -191,13 +211,66 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     clearSearchWatchdog()
     debug.log("bootstrap:search:fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
     try {
-      const batch = request.q
-        ? searchSessionMessages(request.q, { limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
-        : recentSessionMessages({ limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
-      commitSearchBatch(request, batch, `fallback:${reason}`)
+      const response = request.q
+        ? searchSessionMessagesWithStatus(request.q, { limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
+        : recentSessionMessagesWithStatus({ limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
+      setKeywordIndexState(response.keywordState)
+      setVectorState(response.vectorState)
+      requestIndexRebuild(request.db, response.keywordState)
+      commitSearchBatch(request, response.results, `fallback:${reason}`)
     } catch (err) {
       failSearch(request, err instanceof Error ? err.message : String(err))
     }
+  }
+  const shouldRebuildIndex = (state: KeywordIndexState) => state === "missing" || state === "empty" || state === "stale" || state === "error"
+  const ensureIndexWorker = () => {
+    if (indexWorker) return true
+    try {
+      indexWorker = new Worker(new URL("./index-worker.ts", import.meta.url))
+      indexWorker.onmessage = (event: MessageEvent) => {
+        const msg = event.data
+        if (msg.type === "index-started") {
+          debug.log("index-worker:started", { dbPath: msg.dbPath })
+          setKeywordIndexState("indexing")
+          return
+        }
+        if (msg.type === "index-done") {
+          debug.log("index-worker:done", { dbPath: msg.dbPath })
+          activeIndexJobs.delete(msg.dbPath)
+          setKeywordIndexState("ready")
+          if (msg.dbPath === dbPath()) {
+            lastFiredSearchKey = ""
+            scheduleSearch(query().trim(), ownerRole(), dbPath(), directory)
+          }
+          return
+        }
+        if (msg.type === "index-error") {
+          debug.log("index-worker:error", { dbPath: msg.dbPath, error: msg.error })
+          activeIndexJobs.delete(msg.dbPath)
+          setKeywordIndexState("error")
+        }
+      }
+      indexWorker.onerror = (err) => {
+        debug.log("index-worker:error", err.message)
+        activeIndexJobs.clear()
+        setKeywordIndexState("error")
+        indexWorker?.terminate()
+        indexWorker = undefined
+      }
+      return true
+    } catch (err) {
+      debug.log("index-worker:create-error", err instanceof Error ? err.message : String(err))
+      setKeywordIndexState("error")
+      return false
+    }
+  }
+  const requestIndexRebuild = (db: string, state: KeywordIndexState) => {
+    if (!shouldRebuildIndex(state)) return
+    if (activeIndexJobs.has(db)) return
+    if (!ensureIndexWorker()) return
+    activeIndexJobs.add(db)
+    setKeywordIndexState("indexing")
+    indexWorker!.postMessage({ type: "rebuild-index", id: ++indexJobId, dbPath: db })
   }
   const ensureSearchWorker = () => {
     if (searchWorker) return true
@@ -209,6 +282,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           if (msg.id !== searchRequestId) return
           const request = pendingSearchRequest
           if (!request || request.id !== msg.id) return
+          setKeywordIndexState(msg.keywordState ?? "ready")
+          setVectorState(msg.vectorState)
+          requestIndexRebuild(request.db, msg.keywordState ?? "ready")
           commitSearchBatch(request, msg.result, "worker")
         }
         if (msg.type === "error") {
@@ -239,6 +315,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     cancelPreviewPrefetch()
     searchWorker?.terminate()
     searchWorker = undefined
+    indexWorker?.terminate()
+    indexWorker = undefined
+    activeIndexJobs.clear()
   })
 
   const resultRowHeight = createMemo(() => leftWidth() >= 48 ? 3 : 4)
@@ -345,7 +424,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
       searchWorker?.terminate()
       searchWorker = undefined
-      failSearch(request, "Search worker timed out. The conversation index may still be building; try again shortly.")
+      settleSearchAsIndexing(request, "worker-timeout")
     }, SEARCH_WORKER_TIMEOUT_MS)
     ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
     searchWorker!.postMessage(msg)
@@ -1371,7 +1450,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                     }
                   >
                     <Show when={!loading()}>
-                      <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerLabel()} theme={theme()} />}>
+                      <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerLabel()} theme={theme()} keywordIndexState={keywordIndexState()} />}>
                         <box height={resultTopSpacerHeight()} flexShrink={0} />
                         <For each={resultRenderWindow().items}>
                           {(item, index) => {

@@ -11,15 +11,20 @@ import {
   loadConversationAround,
   loadConversationBefore,
   makeSnippet,
+  openSearchIndex,
   parseSemanticConfig,
   performSearch,
+  performSearchWithStatus,
   recentSessionMessages,
+  rebuildKeywordIndexForDbPath,
   resolveDatabasePath,
   rowToSearchResult,
   rowToVectorResult,
   searchSessionMessages,
+  searchSessionMessagesWithStatus,
   type SearchResult,
 } from "./search"
+import { setMeta } from "./search/schema.ts"
 
 describe("session search helpers", () => {
   test("extracts user message text", () => {
@@ -163,6 +168,7 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_4", "msg_3", "ses_1", 4, JSON.stringify({ type: "text", text: "needle user" }))
 
+      rebuildKeywordIndexForDbPath(dbPath)
       expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_4", "prt_1"])
       expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_1"])
       expect(searchSessionMessages("needle", { dbPath, directory: dir, limit: 10, role: "user" }).map((item) => item.id)).toEqual(["prt_4"])
@@ -170,9 +176,63 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_2", "msg_1", "ses_1", 2, JSON.stringify({ type: "text", text: "second beta" }))
 
+      rebuildKeywordIndexForDbPath(dbPath)
       expect(searchSessionMessages("second", { dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2"])
       expect(recentSessionMessages({ dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_4", "prt_2", "prt_1"])
       expect(recentSessionMessages({ dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_2", "prt_1"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("typed search returns immediately while sidecar index is pending", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-search-pending-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "pendingSearchNeedle" }))
+
+      const response = searchSessionMessagesWithStatus("pendingSearchNeedle", { dbPath, directory: dir, limit: 10 })
+      expect(response.keywordState).toBe("empty")
+      expect(response.results).toEqual([])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("typed search returns stale sidecar rows without scanning source", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-search-stale-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_old", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "staleSearchNeedle old" }))
+
+      rebuildKeywordIndexForDbPath(dbPath)
+      setMeta(openSearchIndex(dbPath), "source_path", `${dbPath}.old`)
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_new", "msg_1", "ses_1", 2, JSON.stringify({ type: "text", text: "staleSearchNeedle new" }))
+
+      const response = searchSessionMessagesWithStatus("staleSearchNeedle", { dbPath, directory: dir, limit: 10 })
+      expect(response.keywordState).toBe("stale")
+      expect(response.results.map((item) => item.id)).toEqual(["prt_old"])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
@@ -212,6 +272,7 @@ describe("session search helpers", () => {
           },
         }))
 
+      rebuildKeywordIndexForDbPath(dbPath)
       const results = searchSessionMessages("validateForSubmit", { dbPath, directory: dir, limit: 10 })
       expect(results.map((item) => item.id)).toEqual(["prt_patch"])
       expect(results[0]?.text).toContain("validateForSubmit")
@@ -254,6 +315,7 @@ describe("session search helpers", () => {
         }))
       }
 
+      rebuildKeywordIndexForDbPath(dbPath)
       const first = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10 })
       const second = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10, offset: 10 })
       expect(first).toHaveLength(10)
@@ -314,6 +376,7 @@ describe("session search helpers", () => {
           },
         }))
 
+      rebuildKeywordIndexForDbPath(dbPath)
       const results = searchSessionMessages("collisionSafePatchNeedle", { dbPath, directory: dir, limit: 10 })
       expect(results.map((item) => item.id)).toEqual(["prt_patch"])
     } finally {
@@ -341,7 +404,7 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_2", "msg_2", "ses_1", 2, JSON.stringify({ type: "text", text: "user text" }))
 
-      searchSessionMessages("text", { dbPath, limit: 10 })
+      rebuildKeywordIndexForDbPath(dbPath)
       expect(recentSessionMessages({ dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_2", "prt_1"])
       expect(recentSessionMessages({ dbPath, limit: 10, role: "user" }).map((item) => item.id)).toEqual(["prt_2"])
       expect(recentSessionMessages({ dbPath, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_1"])
@@ -431,7 +494,7 @@ describe("session search helpers", () => {
     }
   })
 
-  test("recent messages falls back to source rows while sidecar index is pending", () => {
+  test("recent messages returns immediately while sidecar index is pending", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-recent-pending-"))
     const dbPath = path.join(dir, "opencode.db")
     const db = new Database(dbPath)
@@ -446,14 +509,14 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "assistant text" }))
 
-      expect(recentSessionMessages({ dbPath, limit: 10 }).map((item) => item.id)).toEqual(["prt_1"])
+      expect(recentSessionMessages({ dbPath, limit: 10 })).toEqual([])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test("recent messages falls back to source rows when sidecar misses active directory", () => {
+  test("recent messages does not source-scan when stale sidecar misses active directory", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-recent-stale-dir-"))
     const dbPath = path.join(dir, "opencode.db")
     const oldDir = path.join(dir, "old")
@@ -470,6 +533,7 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_old", "msg_old", "ses_old", 1, JSON.stringify({ type: "text", text: "old indexed text" }))
 
+      rebuildKeywordIndexForDbPath(dbPath)
       expect(searchSessionMessages("old", { dbPath, directory: oldDir, limit: 10 }).map((item) => item.id)).toEqual(["prt_old"])
 
       db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_current", "Current", currentDir)
@@ -477,7 +541,7 @@ describe("session search helpers", () => {
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_current", "msg_current", "ses_current", 2, JSON.stringify({ type: "text", text: "current source text" }))
 
-      expect(recentSessionMessages({ dbPath, directory: currentDir, limit: 10 }).map((item) => item.id)).toEqual(["prt_current"])
+      expect(recentSessionMessages({ dbPath, directory: currentDir, limit: 10 })).toEqual([])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })
@@ -598,6 +662,62 @@ describe("performSearch", () => {
   test("returns empty for blank query", async () => {
     const results = await performSearch("", { limit: 10 })
     expect(results).toEqual([])
+  })
+
+  test("returns keyword results when vector search is unavailable", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-perform-keyword-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "keywordFallbackNeedle" }))
+
+      rebuildKeywordIndexForDbPath(dbPath)
+      const response = await performSearchWithStatus("keywordFallbackNeedle", { dbPath, directory: dir, limit: 10 })
+      expect(response.results.map((item) => item.id)).toEqual(["prt_1"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("returns keyword results when semantic query embedding times out", async () => {
+    const originalFetch = globalThis.fetch
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-perform-timeout-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "semanticTimeoutNeedle" }))
+
+      rebuildKeywordIndexForDbPath(dbPath)
+      const index = openSearchIndex(dbPath)
+      index.exec("CREATE TABLE IF NOT EXISTS document_vec(rowid INTEGER PRIMARY KEY, embedding BLOB)")
+      setMeta(index, "vector_state", "enabled")
+      setMeta(index, "embedding_dimensions", "3")
+      globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof fetch
+
+      const response = await performSearchWithStatus("semanticTimeoutNeedle", { dbPath, directory: dir, limit: 10 })
+      expect(response.results.map((item) => item.id)).toEqual(["prt_1"])
+    } finally {
+      globalThis.fetch = originalFetch
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

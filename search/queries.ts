@@ -13,19 +13,20 @@ import type {
   IndexSourceRow,
   Row,
   SemanticConfig,
+  KeywordIndexState,
+  SearchResponse,
+  VectorState,
 } from "./types.ts"
 import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery, expandQuery } from "./text.ts"
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
-import { hybridBlend, searchVector, setupVectorTable, configureCustomSQLite, loadVecExtension } from "./vector.ts"
+import { hybridBlend, searchVector, configureCustomSQLite, loadVecExtension, isVectorReady } from "./vector.ts"
 
 // Load custom SQLite before any Database() constructor runs,
 // otherwise Database.setCustomSQLite() fails with "SQLite already loaded"
 configureCustomSQLite()
 
-const backgroundIndexRebuilds = new Set<string>()
-const lastVectorRebuildAttempt = new Map<string, number>()
 const vecExtensionLoading = new Map<string, Promise<void>>()
 
 let _db: Database | undefined
@@ -39,33 +40,42 @@ function getDb(dbPath?: string): Database {
     _db?.close()
     _db = new Database(resolved, { readonly: true })
     _dbPath = resolved
-    tableCache.clear()
   }
   return _db
 }
 
 export function searchSessionMessages(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
+  return searchSessionMessagesWithStatus(query, options).results
+}
+
+export function searchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const term = query.trim()
-  if (!term) return []
-  if (options?.dbPath === ":memory:") return []
+  if (!term) return searchResponse([], "ready")
+  if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
-  return searchRows(db, dbPath, term, options?.limit ?? 80, options?.directory, options?.offset, options?.role)
+  const index = openSearchIndex(dbPath)
+  const status = readKeywordIndexState(db, index, dbPath)
+  const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, term, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
+  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, term) ?? []), status.state, getVectorState(index))
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
+  return recentSessionMessagesWithStatus(options).results
+}
+
+export function recentSessionMessagesWithStatus(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const dbPath = options?.dbPath ?? resolveDatabasePath()
+  if (dbPath === ":memory:") return searchResponse([], "missing")
   const db = getDb(dbPath)
   const limit = options?.limit ?? 40
-  const indexed = dbPath === ":memory:" ? undefined : indexedRecentRows(db, dbPath, limit, options?.directory, options?.offset, options?.role)
-  if (indexed && !indexed.stale && indexed.rows.length > 0) return indexed.rows.flatMap((row) => rowToSearchResult(row, "") ?? [])
-
-  if (dbPath !== ":memory:") scheduleBackgroundIndexRebuild(dbPath)
-  if (!indexed) debug.log("query:recent:index-pending", { limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
-
-  const sourceRows = sourceRecentRows(db, limit, options?.directory, options?.offset, options?.role)
-  if (sourceRows) return sourceRows.flatMap((row) => rowToSearchResult(row, "") ?? [])
-  return indexed?.rows.flatMap((row) => rowToSearchResult(row, "") ?? []) ?? []
+  const index = openSearchIndex(dbPath)
+  const status = readKeywordIndexState(db, index, dbPath)
+  const rows = canQueryKeywordIndex(status.state) ? queryRecentRows(index, limit, options?.directory, options?.offset, options?.role) : []
+  if (!rows.length && (status.state === "missing" || status.state === "empty" || status.state === "indexing")) {
+    debug.log("query:recent:index-pending", { state: status.state, limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
+  }
+  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, "") ?? []), status.state, getVectorState(index))
 }
 
 export function loadConversationAround(result: SearchResult, options?: { before?: number; after?: number; dbPath?: string }): ConversationPreviewPage {
@@ -238,77 +248,55 @@ export function loadConversationAfter(result: SearchResult, cursor: Conversation
 }
 
 export async function performSearch(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): Promise<SearchResult[]> {
-  if (!query.trim()) return searchSessionMessages(query, options)
+  return (await performSearchWithStatus(query, options)).results
+}
+
+export async function performSearchWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): Promise<SearchResponse> {
+  if (!query.trim()) return searchSessionMessagesWithStatus(query, options)
   const config = parseSemanticConfig()
   if (!config.disableVector) {
     try {
-      return await semanticSearchSessionMessages(query, options)
+      return await semanticSearchSessionMessagesWithStatus(query, options)
     } catch {
       debug.log("query:hybrid:fallback", { message: "hybrid search failed, falling back to keyword" })
     }
   }
-  return searchSessionMessages(query, options)
+  return searchSessionMessagesWithStatus(query, options)
 }
 
 export async function semanticSearchSessionMessages(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): Promise<SearchResult[]> {
+  return (await semanticSearchSessionMessagesWithStatus(query, options)).results
+}
+
+export async function semanticSearchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): Promise<SearchResponse> {
   const term = query.trim()
-  if (!term) return []
-  if (options?.dbPath === ":memory:") return []
+  if (!term) return searchResponse([], "ready")
+  if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
   const limit = options?.limit ?? 80
   const dir = options?.directory
   const role = options?.role
 
-  const index = ensureSearchIndex(db, dbPath)
-  if (!index) return []
-
-  const keyword = indexedTextRows(db, dbPath, limit, term, dir, options?.offset, role) ?? []
+  const index = openSearchIndex(dbPath)
+  const status = readKeywordIndexState(db, index, dbPath)
+  const keyword = canQueryKeywordIndex(status.state) ? queryFtsRows(index, term, limit, dir, options?.offset, role) : []
   const config = parseSemanticConfig()
+  let vectorState = getVectorState(index)
 
   let vector: Row[] = []
-  if (!config.disableVector) {
-    let vecState = getMeta(index, "vector_state")
-    if (vecState !== "enabled" && vecState !== "disabled" && vecState !== "stale") {
-      const indexPath = searchIndexPath(dbPath)
-      const lastAttempt = lastVectorRebuildAttempt.get(indexPath)
-      if (!lastAttempt || Date.now() - lastAttempt > 30_000) {
-        setupVectorTable(index, config, indexPath)
-        lastVectorRebuildAttempt.set(indexPath, Date.now())
-        vecState = getMeta(index, "vector_state") ?? "stale"
-      }
-    }
-    if (vecState === "stale" && getMeta(index, "embedding_dimensions")) {
+  if (!config.disableVector && isVectorReady(index)) {
       try {
         const indexPath = searchIndexPath(dbPath)
-        await vecExtensionLoading.get(indexPath)
-        const test = index.query("SELECT COUNT(*) as count FROM document_vec").get() as { count: number } | undefined
-        if (test && test.count > 0) {
-          setMeta(index, "vector_state", "enabled")
-          vecState = "enabled"
-        }
-      } catch {
-        debug.log("vector:stale:recovery-failed")
-      }
-    }
-    if (vecState === "enabled") {
-      try {
-        const indexPath = searchIndexPath(dbPath)
-        await vecExtensionLoading.get(indexPath)
-        const client = new LlamaEmbeddingClient({
-          baseUrl: config.embedBaseUrl,
-          model: config.embedModel,
-          documentPrefix: config.documentPrefix,
-          queryPrefix: config.queryPrefix,
-        })
+        await withDeadline(vecExtensionLoading.get(indexPath) ?? Promise.resolve(), 250)
         const embedTerm = expandQuery(term)
-        const embedding = await client.embedQuery(embedTerm)
+        const embedding = await withDeadline(embedQuery(config, embedTerm), 1200)
         vector = searchVector(index, embedding, limit)
         debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== term ? embedTerm : undefined })
       } catch (err) {
         debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
+        vectorState = getVectorState(index)
       }
-    }
   }
 
   const merged = keyword.length || vector.length
@@ -332,176 +320,59 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
     }
   }
 
-  return results.slice(0, limit)
+  return searchResponse(results.slice(0, limit), status.state, vectorState)
 }
 
-function searchRows(db: Database, dbPath: string, query: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
-  if (!tableExists(db, "part") || !tableExists(db, "message")) return []
-  debug.time("query:sql")
-  const rows = indexedTextRows(db, dbPath, limit, query, directory, offset, role) ?? visibleTextRows(db, limit, query, directory, offset, role)
-  debug.timeEnd("query:sql")
-  debug.time("query:map")
-  const results = rows.flatMap((row) => rowToSearchResult(row, query) ?? [])
-  debug.timeEnd("query:map")
-  return results
+function searchResponse(results: SearchResult[], keywordState: KeywordIndexState, vectorState?: VectorState): SearchResponse {
+  return {
+    results,
+    keywordState,
+    vectorState,
+    stale: keywordState === "stale",
+  }
 }
 
-function indexedTextRows(db: Database, dbPath: string, limit: number, query: string, directory?: string, offset?: number, role?: SearchRole) {
-  const match = ftsQuery(query)
-  if (!match) return []
+function canQueryKeywordIndex(state: KeywordIndexState) {
+  return state === "ready" || state === "stale"
+}
+
+function getVectorState(index: Database): VectorState {
+  const state = getMeta(index, "vector_state")
+  if (state === "enabled" || state === "disabled" || state === "unavailable" || state === "stale" || state === "indexing") return state
+  return "unavailable"
+}
+
+async function embedQuery(config: SemanticConfig, query: string) {
+  const client = new LlamaEmbeddingClient({
+    baseUrl: config.embedBaseUrl,
+    model: config.embedModel,
+    documentPrefix: config.documentPrefix,
+    queryPrefix: config.queryPrefix,
+  })
+  return client.embedQuery(query)
+}
+
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const index = ensureSearchIndex(db, dbPath)
-    if (!index) return []
-    const conditions = ["document_fts MATCH ?"]
-    const params: (string | number)[] = [match]
-    if (role) {
-      conditions.push("role = ?")
-      params.push(role)
-    }
-    if (directory) {
-      conditions.push("directory = ?")
-      params.push(directory)
-    }
-    params.push(limit)
-    if (offset) params.push(offset)
-    const offsetClause = offset ? "OFFSET ?" : ""
-    debug.time("query:fts:exec")
-    const rows = index.query<Row, (string | number)[]>(`
-      SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
-             CAST(time_created AS INTEGER) AS time_created, text
-      FROM document_fts
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY bm25(document_fts), CAST(time_created AS INTEGER) DESC
-      LIMIT ? ${offsetClause}
-    `).all(...params as any[])
-    debug.timeEnd("query:fts:exec")
-    return rows
-  } catch (err) {
-    debug.log("fts:fallback", err instanceof Error ? err.message : String(err))
-    return
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms)
+        ;(timer as { unref?: () => void }).unref?.()
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
-type IndexedRecentRows = {
-  rows: Row[]
-  stale: boolean
+type KeywordIndexStatus = {
+  state: KeywordIndexState
+  rowCount: number
 }
 
-function indexedRecentRows(db: Database, dbPath: string, limit: number, directory?: string, offset?: number, role?: SearchRole): IndexedRecentRows | undefined {
-  try {
-    const index = ensureSearchIndex(db, dbPath, { rebuild: false, useStale: true })
-    if (!index) {
-      debug.log("query:recent:index:missing", { dbPath })
-      return
-    }
-
-    const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_index").get()?.count ?? 0
-    if (rowCount === 0) {
-      debug.log("query:recent:index:empty", { dbPath })
-      return { rows: [], stale: true }
-    }
-
-    const state = sourceState(db, dbPath)
-    const currentDataVersion = getMeta(index, "source_data_version")
-    const currentMtimeMs = getMeta(index, "source_mtime_ms")
-    const currentPath = getMeta(index, "source_path")
-    const currentIndexVersion = getMeta(index, "index_version")
-    const stale = currentPath !== dbPath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION
-    if (stale) {
-      debug.log("query:recent:index:stale", {
-        dbPath,
-        expectedDataVersion: state.dataVersion,
-        actualDataVersion: currentDataVersion,
-      })
-      scheduleBackgroundIndexRebuild(dbPath)
-    }
-
-    const conditions: string[] = ["part_type = 'text'"]
-    const params: (string | number)[] = []
-    if (role) {
-      conditions.push("role = ?")
-      params.push(role)
-    }
-    if (directory) {
-      conditions.push("directory = ?")
-      params.push(directory)
-    }
-    params.push(limit)
-    if (offset) params.push(offset)
-
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""
-    const offsetClause = offset ? "OFFSET ?" : ""
-    debug.time("query:recent:index:exec")
-    const rows = index.query<Row, (string | number)[]>(`
-      SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
-             CAST(time_created AS INTEGER) AS time_created, text
-      FROM document_index
-      ${where}
-      ORDER BY CAST(time_created AS INTEGER) DESC
-      LIMIT ? ${offsetClause}
-    `).all(...params as any[])
-    debug.timeEnd("query:recent:index:exec")
-    return { rows, stale }
-  } catch (err) {
-    debug.log("recent:index:fallback", err instanceof Error ? err.message : String(err))
-    return
-  }
-}
-
-function sourceRecentRows(db: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {
-  try {
-    if (!tableExists(db, "part") || !tableExists(db, "message") || !tableExists(db, "session")) return []
-    debug.log("query:recent:source-fallback", { limit, offset: offset ?? 0, directory, role })
-    return visibleTextRows(db, limit, undefined, directory, offset, role)
-  } catch (err) {
-    debug.log("query:recent:source-fallback:error", err instanceof Error ? err.message : String(err))
-    return
-  }
-}
-
-function visibleTextRows(db: Database, limit: number, query?: string, directory?: string, offset?: number, role?: SearchRole) {
-  const offsetClause = offset ? "OFFSET ?" : ""
-  const conditions: string[] = [
-    "json_extract(p.data, '$.type') = 'text'",
-    role ? "json_extract(m.data, '$.role') = ?" : "json_extract(m.data, '$.role') IN ('user', 'assistant')",
-  ]
-  const params: (string | number)[] = []
-
-  if (role) params.push(role)
-
-  if (directory) {
-    conditions.push("s.directory = ?")
-    params.push(directory)
-  }
-
-  const tokens = query ? query.trim().split(/\s+/).filter(Boolean) : []
-  for (const token of tokens) {
-    conditions.push("json_extract(p.data, '$.text') LIKE ?")
-    params.push(`%${token}%`)
-  }
-
-  params.push(limit)
-  if (offset) params.push(offset)
-
-  const sql = `
-    SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
-           json_extract(m.data, '$.role') AS role,
-           p.time_created,
-           json_extract(p.data, '$.text') AS text
-    FROM part p
-    JOIN message m ON m.id = p.message_id
-    JOIN session s ON s.id = p.session_id
-    WHERE ${conditions.join(" AND ")}
-    ORDER BY p.time_created DESC
-    LIMIT ? ${offsetClause}
-  `
-  debug.time("query:sql:exec")
-  const rows = db.query<Row, (string | number)[]>(sql).all(...params as any[])
-  debug.timeEnd("query:sql:exec")
-  return rows
-}
-
-function ensureSearchIndex(source: Database, sourcePath: string, options?: { rebuild?: boolean; useStale?: boolean }) {
+export function openSearchIndex(sourcePath: string) {
   const indexPath = searchIndexPath(sourcePath)
   if (!_indexDb || _indexDbPath !== indexPath) {
     _indexDb?.close()
@@ -511,39 +382,93 @@ function ensureSearchIndex(source: Database, sourcePath: string, options?: { reb
     migrateSearchIndex(_indexDb)
     vecExtensionLoading.set(indexPath, loadVecExtension(_indexDb).then(() => {}).catch(() => {}))
   }
-
-  const state = sourceState(source, sourcePath)
-  const currentDataVersion = getMeta(_indexDb, "source_data_version")
-  const currentMtimeMs = getMeta(_indexDb, "source_mtime_ms")
-  const currentPath = getMeta(_indexDb, "source_path")
-  const currentIndexVersion = getMeta(_indexDb, "index_version")
-  if (currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION) {
-    if (options?.rebuild === false) {
-      if (options?.useStale) return _indexDb
-      return
-    }
-    rebuildSearchIndex(source, _indexDb, sourcePath, state)
-  }
   return _indexDb
 }
 
-function scheduleBackgroundIndexRebuild(dbPath: string) {
-  if (backgroundIndexRebuilds.has(dbPath)) return
-  backgroundIndexRebuilds.add(dbPath)
-  debug.log("fts:rebuild:background-scheduled", { dbPath })
-  const timer = setTimeout(() => {
-    debug.time("fts:rebuild:background")
-    try {
-      const db = getDb(dbPath)
-      ensureSearchIndex(db, dbPath)
-    } catch (err) {
-      debug.log("fts:rebuild:background:error", err instanceof Error ? err.message : String(err))
-    } finally {
-      backgroundIndexRebuilds.delete(dbPath)
-      debug.timeEnd("fts:rebuild:background")
-    }
-  }, 250)
-  ;(timer as { unref?: () => void }).unref?.()
+export function readKeywordIndexState(source: Database, index: Database, sourcePath: string): KeywordIndexStatus {
+  try {
+    const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_index").get()?.count ?? 0
+    const storedState = getMeta(index, "keyword_index_state")
+    if (storedState === "indexing" && rowCount === 0) return { state: "indexing", rowCount }
+    if (storedState === "error" && rowCount === 0) return { state: "error", rowCount }
+    if (rowCount === 0) return { state: "empty", rowCount }
+
+    const state = sourceState(source, sourcePath)
+    const currentDataVersion = getMeta(index, "source_data_version")
+    const currentMtimeMs = getMeta(index, "source_mtime_ms")
+    const currentPath = getMeta(index, "source_path")
+    const currentIndexVersion = getMeta(index, "index_version")
+    const stale = currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION
+    return { state: stale ? "stale" : "ready", rowCount }
+  } catch (err) {
+    debug.log("keyword:index:state-error", err instanceof Error ? err.message : String(err))
+    return { state: "error", rowCount: 0 }
+  }
+}
+
+function queryFtsRows(index: Database, query: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+  const match = ftsQuery(query)
+  if (!match) return []
+  const conditions = ["document_fts MATCH ?"]
+  const params: (string | number)[] = [match]
+  if (role) {
+    conditions.push("role = ?")
+    params.push(role)
+  }
+  if (directory) {
+    conditions.push("directory = ?")
+    params.push(directory)
+  }
+  params.push(limit)
+  if (offset) params.push(offset)
+  const offsetClause = offset ? "OFFSET ?" : ""
+  debug.time("query:fts:exec")
+  const rows = index.query<Row, (string | number)[]>(`
+    SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
+           CAST(time_created AS INTEGER) AS time_created, text
+    FROM document_fts
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY bm25(document_fts), CAST(time_created AS INTEGER) DESC
+    LIMIT ? ${offsetClause}
+  `).all(...params as any[])
+  debug.timeEnd("query:fts:exec")
+  return rows
+}
+
+function queryRecentRows(index: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+  const conditions: string[] = ["part_type = 'text'"]
+  const params: (string | number)[] = []
+  if (role) {
+    conditions.push("role = ?")
+    params.push(role)
+  }
+  if (directory) {
+    conditions.push("directory = ?")
+    params.push(directory)
+  }
+  params.push(limit)
+  if (offset) params.push(offset)
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""
+  const offsetClause = offset ? "OFFSET ?" : ""
+  debug.time("query:recent:index:exec")
+  const rows = index.query<Row, (string | number)[]>(`
+    SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
+           CAST(time_created AS INTEGER) AS time_created, text
+    FROM document_index
+    ${where}
+    ORDER BY CAST(time_created AS INTEGER) DESC
+    LIMIT ? ${offsetClause}
+  `).all(...params as any[])
+  debug.timeEnd("query:recent:index:exec")
+  return rows
+}
+
+export function rebuildKeywordIndexForDbPath(dbPath: string) {
+  const source = getDb(dbPath)
+  const index = openSearchIndex(dbPath)
+  const state = sourceState(source, dbPath)
+  rebuildKeywordIndex(source, index, dbPath, state)
 }
 
 function sourceState(db: Database, sourcePath: string) {
@@ -556,7 +481,7 @@ function hashPartData(value: { session_id: string; message_id: string; part_id: 
   return createHash("sha256").update(`${value.session_id}:${value.message_id}:${value.part_id}`).digest("hex")
 }
 
-function rebuildSearchIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
+export function rebuildKeywordIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
   debug.time("fts:rebuild")
   const rows = source.query<IndexSourceRow, []>(`
     SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
@@ -594,6 +519,7 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
   `)
   index.exec("BEGIN IMMEDIATE")
   try {
+    setMeta(index, "keyword_index_state", "indexing")
     index.exec("DELETE FROM document")
     index.exec("DELETE FROM document_fts")
     index.exec("DELETE FROM document_index")
@@ -649,6 +575,7 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     setMeta(index, "schema_version", "2")
     setMeta(index, "extractor_version", DOCUMENT_EXTRACTOR_VERSION)
     setMeta(index, "ranking_version", "1")
+    setMeta(index, "keyword_index_state", "ready")
     setMeta(index, "embedding_base_url", config.embedBaseUrl)
     setMeta(index, "document_prefix", config.documentPrefix)
     setMeta(index, "query_prefix", config.queryPrefix)
@@ -656,6 +583,7 @@ function rebuildSearchIndex(source: Database, index: Database, sourcePath: strin
     index.exec("COMMIT")
   } catch (err) {
     index.exec("ROLLBACK")
+    setMeta(index, "keyword_index_state", "error")
     throw err
   } finally {
     debug.timeEnd("fts:rebuild")
@@ -782,14 +710,6 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : undefined
-}
-
-const tableCache = new Map<string, boolean>()
-function tableExists(db: Database, name: string) {
-  if (tableCache.has(name)) return tableCache.get(name)!
-  const exists = Boolean(db.query<{ name: string }, [string]>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))
-  tableCache.set(name, exists)
-  return exists
 }
 
 function countBy<T>(items: T[], key: (item: T) => string) {
