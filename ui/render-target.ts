@@ -13,10 +13,14 @@ export function messageTargetID(item: SearchResult) {
   return item.messageID
 }
 
+export function previewPartTargetID(item: SearchResult) {
+  return `preview-part-${item.id}`
+}
+
 export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
   if (!scroll) {
     debug.log("preview:target-scroll:skip", { reason: "no-scroll", targetID })
-    return
+    return false
   }
   const target = findRenderableByID(scroll, targetID)
   if (!target) {
@@ -29,7 +33,7 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
       height: scroll.height,
       children: scroll.getChildren().length,
     })
-    return
+    return false
   }
   const contentY = target.y + scroll.scrollTop - scroll.y
   const desiredScrollTop = Math.max(0, contentY - Math.max(1, Math.floor(scroll.height / 3)))
@@ -45,6 +49,7 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
   })
   scroll.scrollTo(desiredScrollTop)
   debug.log("preview:target-scroll:after", { targetID, scrollY: scroll.y, scrollTop: scroll.scrollTop, desiredScrollTop })
+  return true
 }
 
 export function jumpToRenderedTarget(root: unknown, targetID: string) {

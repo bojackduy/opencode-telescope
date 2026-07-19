@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { findRenderableByID, messageTargetID, previewScrollAmount } from "./render-target.ts"
+import { findRenderableByID, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
 import type { SearchResult } from "../search.ts"
 
 describe("render-target utils", () => {
@@ -15,6 +15,10 @@ describe("render-target utils", () => {
 
     const userItem = { partType: "text", role: "user", messageID: "msg_4", id: "prt_4" } as SearchResult
     expect(messageTargetID(userItem)).toBe("msg_4")
+  })
+
+  test("previewPartTargetID returns wrapper target ID", () => {
+    expect(previewPartTargetID({ id: "prt_1" } as SearchResult)).toBe("preview-part-prt_1")
   })
 
   test("previewScrollAmount returns minimum of 1", () => {
@@ -51,5 +55,42 @@ describe("render-target utils", () => {
     expect(findRenderableByID(tree, "nonexistent")).toBeUndefined()
     expect(findRenderableByID(null, "x")).toBeUndefined()
     expect(findRenderableByID("string", "x")).toBeUndefined()
+  })
+
+  test("scrollPreviewToTarget scrolls target near upper third", () => {
+    const scroll = {
+      id: "scroll",
+      y: 10,
+      height: 30,
+      scrollTop: 40,
+      scrollHeight: 200,
+      scrolledTo: undefined as number | undefined,
+      scrollTo(value: number) {
+        this.scrolledTo = value
+        this.scrollTop = value
+      },
+      getChildren() {
+        return [
+          { id: "target", y: 50, height: 5, getChildren: () => [] },
+        ]
+      },
+    }
+
+    expect(scrollPreviewToTarget(scroll as never, "target")).toBe(true)
+    expect(scroll.scrolledTo).toBe(70)
+  })
+
+  test("scrollPreviewToTarget reports missing target", () => {
+    const scroll = {
+      id: "scroll",
+      y: 0,
+      height: 20,
+      scrollTop: 0,
+      scrollHeight: 20,
+      scrollTo() {},
+      getChildren: () => [],
+    }
+
+    expect(scrollPreviewToTarget(scroll as never, "missing")).toBe(false)
   })
 })

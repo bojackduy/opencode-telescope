@@ -26,7 +26,7 @@ import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
-import { findRenderableByID, jumpToRenderedTarget, messageTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { findRenderableByID, jumpToRenderedTarget, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
   debug.log("component:render:start")
@@ -139,7 +139,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewBeforeAdjusting = false
   let pendingCoalescedExplicit: { requestedAmount: number } | undefined
   let pendingPreviewAnchorCorrection: { anchorPartID: string; visualOffset: number; createdAt: number; expiresAt: number } | undefined
+  let pendingPreviewTarget: { itemID: string; targetID: string; attempts: number; alignedAttempts: number; createdAt: number } | undefined
+  let previewTargetTimer: ReturnType<typeof setTimeout> | undefined
   const previewMeasuredHeights = new Map<string, number>()
+  const cancelPreviewTargetAlignment = () => {
+    if (previewTargetTimer) clearTimeout(previewTargetTimer)
+    previewTargetTimer = undefined
+    pendingPreviewTarget = undefined
+  }
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
     if (previewAfterTimer) clearTimeout(previewAfterTimer)
@@ -150,6 +157,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     previewBeforeAdjusting = false
     pendingCoalescedExplicit = undefined
     pendingPreviewAnchorCorrection = undefined
+    cancelPreviewTargetAlignment()
     setPrefetchingPreviewBefore(false)
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
@@ -950,32 +958,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             }
           }
 
-          if (pending.intent === "passive-prefetch") {
-            const matchItem = selectedResult()
-            const scroll = previewScroll
-            if (matchItem && scroll) {
-              const layout = previewVirtualLayout()
-              const matchRow = layout.find((r) => r.part.id === matchItem.id)
-              if (matchRow) {
-                const viewportHeight = scroll.height
-                const desiredScrollTop = Math.max(0, matchRow.top - Math.floor(viewportHeight / 3))
-                const msSinceManual = Date.now() - lastPreviewScrollKeyMs
-                if (Math.abs(scroll.scrollTop - desiredScrollTop) >= 2 && msSinceManual > 700) {
-                  const correctedWindow = previewWindowForLayout(layout, desiredScrollTop, viewportHeight)
-                  setPreviewWindow(correctedWindow)
-                  scroll.scrollTo(desiredScrollTop)
-                  debug.log("preview:load-before:recenter", {
-                    matchPartID: matchItem.id,
-                    matchTop: matchRow.top,
-                    scrollTop: scroll.scrollTop,
-                    desiredScrollTop,
-                    viewportHeight,
-                    window: correctedWindow,
-                  })
-                }
-              }
-            }
-          }
         }, 1)
       }
       setHasMorePreviewBefore(page.hasMoreBefore)
@@ -1155,37 +1137,64 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }, 1)
   }
 
-  const scrollPreviewToEstimatedTarget = (item: SearchResult) => {
+  const scrollPreviewToEstimatedWindow = (item: SearchResult, reason: string) => {
     const scroll = previewScroll
     if (!scroll) return
-    const targetID = messageTargetID(item)
     const row = previewVirtualLayout().find((entry) => entry.part.id === item.id)
-    if (!row) {
-      scrollPreviewToTarget(scroll, targetID)
+    if (!row) return
+
+    const top = Math.max(0, row.top - Math.max(1, Math.floor(scroll.height / 3)))
+    const nextWindow = previewWindowForLayout(previewVirtualLayout(), top, scroll.height)
+    debug.log("preview:target-scroll:estimated", { item: item.id, reason, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: nextWindow })
+    setPreviewWindow(nextWindow)
+    scroll.scrollTo(top)
+    updatePreviewWindow()
+  }
+
+  const runPreviewTargetAlignment = () => {
+    const target = pendingPreviewTarget
+    const item = selectedResult()
+    const scroll = previewScroll
+    if (!target || !item || item.id !== target.itemID || !scroll) {
+      cancelPreviewTargetAlignment()
+      return
+    }
+    if (lastPreviewScrollKeyMs > target.createdAt) {
+      debug.log("preview:target-scroll:cancel", { reason: "manual-scroll", targetID: target.targetID })
+      cancelPreviewTargetAlignment()
       return
     }
 
-    const top = Math.max(0, row.top - Math.max(1, Math.floor(scroll.height / 3)))
-    debug.log("preview:target-scroll:estimated", { targetID, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: previewWindow() })
-    scroll.scrollTo(top)
-    updatePreviewWindow()
-    const scrollTopBeforeReal = scroll.scrollTop
-    setTimeout(() => {
-      scrollPreviewToTarget(scroll, targetID)
-      const now = Date.now()
-      const adjustmentMs = lastPreviewScrollKeyMs
-      if (adjustmentMs > 0 && now - adjustmentMs > 300) {
-        const targetTopReal = row.top
-        const expectedScrollTop = Math.max(0, targetTopReal - Math.max(1, Math.floor(scroll.height / 3)))
-        const drift = scroll.scrollTop - expectedScrollTop
-        if (Math.abs(drift) >= 2) {
-          const correctedScrollTop = scroll.scrollTop - drift
-          const correctedWindow = previewWindowForLayout(previewVirtualLayout(), correctedScrollTop, scroll.height)
-          setPreviewWindow(correctedWindow)
-          scroll.scrollTo(correctedScrollTop)
-          debug.log("preview:target-scroll:real-correct", { targetID, drift, scrollTopAfterReal: scroll.scrollTop, correctedScrollTop, window: correctedWindow })
-        }
-      }
+    target.attempts++
+    const aligned = scrollPreviewToTarget(scroll, target.targetID)
+    if (aligned) {
+      target.alignedAttempts++
+      updatePreviewWindow()
+    }
+
+    if (target.alignedAttempts >= 4 || (!aligned && target.attempts >= 12)) {
+      cancelPreviewTargetAlignment()
+      return
+    }
+    previewTargetTimer = setTimeout(() => {
+      previewTargetTimer = undefined
+      runPreviewTargetAlignment()
+    }, aligned ? 25 : 16)
+  }
+
+  const queuePreviewTargetAlignment = (item: SearchResult, reason: string) => {
+    cancelPreviewTargetAlignment()
+    pendingPreviewTarget = {
+      itemID: item.id,
+      targetID: previewPartTargetID(item),
+      attempts: 0,
+      alignedAttempts: 0,
+      createdAt: Date.now(),
+    }
+    scrollPreviewToEstimatedWindow(item, reason)
+    previewTargetTimer = setTimeout(() => {
+      previewTargetTimer = undefined
+      runPreviewTargetAlignment()
     }, 1)
   }
 
@@ -1225,7 +1234,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       setPreviewParts(page.parts)
       setHasMorePreviewBefore(page.hasMoreBefore)
       setHasMorePreviewAfter(page.hasMoreAfter)
-      setTimeout(() => scrollPreviewToEstimatedTarget(item), 1)
+      setTimeout(() => queuePreviewTargetAlignment(item, "new-item"), 1)
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
@@ -1275,17 +1284,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     onCleanup(() => clearInterval(interval))
   })
 
-  let scrolledItem = ""
-  createEffect(() => {
-    const item = selectedResult()
-    previewVirtualLayout()
-    if (!item) return
-    if (item.id === scrolledItem) return
-    scrolledItem = item.id
-    const timer = setTimeout(() => scrollPreviewToEstimatedTarget(item), 1)
-    onCleanup(() => clearTimeout(timer))
-  })
-
   const open = () => {
     const item = selectedResult()
     if (!item) return
@@ -1305,6 +1303,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     const beforeState = previewScrollState()
     lastPreviewScrollKeyMs = Date.now()
+    cancelPreviewTargetAlignment()
     debug.log("preview:scroll-key", { direction, state: beforeState })
 
     const requestedAmount = previewScrollAmount(scroll)
