@@ -22,8 +22,19 @@ describe("parseSearchQuery", () => {
     expect(parseSearchQuery("url:https://example.com")).toMatchObject({ term: "url:https://example.com", explicitScope: false })
   })
 
+  test("treats explicit plain prefixes as literal text", () => {
+    expect(parseSearchQuery("text:patch:SearchResponse")).toMatchObject({ term: "patch:SearchResponse", explicitScope: false })
+    expect(parseSearchQuery("literal:user:timeout")).toMatchObject({ term: "user:timeout", explicitScope: false })
+  })
+
+  test("treats a leading backslash as literal text", () => {
+    expect(parseSearchQuery("\\patch:SearchResponse")).toMatchObject({ term: "patch:SearchResponse", explicitScope: false })
+  })
+
   test("builds display labels", () => {
     expect(searchQueryLabel("patch:SearchResponse")).toBe("match in patch: SearchResponse")
+    expect(searchQueryLabel("text:patch:SearchResponse")).toBe("match: patch:SearchResponse")
+    expect(searchQueryLabel("\\patch:SearchResponse")).toBe("match: patch:SearchResponse")
     expect(searchQueryLabel("tool:apply_patch SearchResponse")).toBe("match in tool:apply_patch: SearchResponse")
     expect(searchQueryLabel("SearchResponse")).toBe("match: SearchResponse")
   })
@@ -58,5 +69,11 @@ describe("searchQueryHint", () => {
     expect(searchQueryHint("patch:SearchResponse")).toBe("Scoped search overrides the owner toggle.")
     expect(searchQueryHint("in:patch SearchResponse")).toBe("Scoped search overrides the owner toggle.")
     expect(searchQueryHint("tool:apply_patch SearchResponse")).toBe("Scoped search overrides the owner toggle.")
+  })
+
+  test("explains plain searches for scope-like text", () => {
+    expect(searchQueryHint("text:")).toBe("text:<term> searches plain conversation text, even if the term looks like scope syntax.")
+    expect(searchQueryHint("text:patch:SearchResponse")).toBe("Plain search treats scope-like text literally.")
+    expect(searchQueryHint("\\patch:SearchResponse")).toBe("Leading \\ searches the rest as plain text, not scope syntax.")
   })
 })

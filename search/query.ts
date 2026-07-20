@@ -24,6 +24,14 @@ export function parseSearchQuery(raw: string): ParsedSearchQuery {
   const base = { raw, term: trimmed, explicitScope: false }
   if (!trimmed) return base
 
+  if (trimmed.startsWith("\\")) {
+    const literal = trimmed.slice(1).trim()
+    if (literal) return { raw, term: literal, explicitScope: false }
+  }
+
+  const plainMatch = /^(?:text|literal):([\s\S]*)$/i.exec(trimmed)
+  if (plainMatch) return { raw, term: plainMatch[1]!.trim(), explicitScope: false }
+
   const inMatch = /^in:([a-z][\w-]*)(?:\s+([\s\S]*))?$/i.exec(trimmed)
   if (inMatch) {
     const kind = scopeAliases[inMatch[1]!.toLowerCase()]
@@ -64,8 +72,13 @@ export function searchQueryHint(raw: string): string {
   if (!trimmed) return "Bare search: user prompts + assistant replies. Try patch:SearchResponse or thought:indexing"
 
   const lower = trimmed.toLowerCase()
+  if (lower === "text:" || lower === "literal:") return "text:<term> searches plain conversation text, even if the term looks like scope syntax."
   if (lower === "in:") return "in:<scope> <term> supports user, assistant, thought, and patch."
   if (lower === "tool:") return "tool:<name> <term> searches one tool, for example tool:apply_patch SearchResponse."
+  if (trimmed.startsWith("\\")) return "Leading \\ searches the rest as plain text, not scope syntax."
+
+  const plainMatch = /^(?:text|literal):([\s\S]*)$/i.exec(trimmed)
+  if (plainMatch) return "Plain search treats scope-like text literally."
 
   const inMatch = /^in:([a-z][\w-]*)(?:\s+([\s\S]*))?$/i.exec(trimmed)
   if (inMatch && !(inMatch[2] ?? "").trim()) {

@@ -75,6 +75,8 @@ Telescope defaults to fast keyword search across user prompts and assistant repl
 | `patch:SearchResponse` | Code edits from `apply_patch`, `edit`, and `write` tools |
 | `in:patch SEARCH_WORKER_TIMEOUT_MS` | Same as `patch:...`, useful when you prefer `in:<scope>` |
 | `tool:apply_patch SearchResponse` | A specific tool's indexed content |
+| `text:patch:SearchResponse` | Literal conversation text that looks like scope syntax |
+| `\patch:SearchResponse` | Same literal search using a leading backslash escape |
 
 Scoped queries highlight only the searched term, so `patch:SearchResponse` highlights `SearchResponse`, not the `patch:` prefix. Explicit scopes override the owner filter.
 
