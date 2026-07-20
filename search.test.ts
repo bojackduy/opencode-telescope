@@ -22,6 +22,7 @@ import {
   rowToVectorResult,
   searchSessionMessages,
   searchSessionMessagesWithStatus,
+  searchIndexPath,
   type SearchResult,
 } from "./search"
 import { setMeta } from "./search/schema.ts"
@@ -277,6 +278,130 @@ describe("session search helpers", () => {
       expect(results.map((item) => item.id)).toEqual(["prt_patch"])
       expect(results[0]?.text).toContain("validateForSubmit")
     } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("supports explicit scoped search filters", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-scoped-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Scoped Test", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_user", "ses_1", JSON.stringify({ role: "user" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_assistant", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_user", "msg_user", "ses_1", 1, JSON.stringify({ type: "text", text: "scopeNeedle from user" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_assistant", "msg_assistant", "ses_1", 2, JSON.stringify({ type: "text", text: "scopeNeedle from assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_thought", "msg_assistant", "ses_1", 3, JSON.stringify({ type: "reasoning", text: "scopeNeedle from thought" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_patch", "msg_assistant", "ses_1", 4, JSON.stringify({
+          type: "tool",
+          tool: "apply_patch",
+          state: {
+            status: "completed",
+            input: { patchText: "*** Begin Patch\n+const scopeNeedle = true\n*** End Patch" },
+            metadata: {},
+          },
+        }))
+
+      rebuildKeywordIndexForDbPath(dbPath)
+
+      expect(searchSessionMessages("user:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_user"])
+      expect(searchSessionMessages("assistant:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_assistant"])
+      expect(searchSessionMessages("thought:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_thought"])
+      expect(searchSessionMessages("patch:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_patch"])
+      expect(searchSessionMessages("tool:apply_patch scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_patch"])
+      expect(searchSessionMessages("tool:edit scopeNeedle", { dbPath, directory: dir, limit: 10 })).toEqual([])
+      expect(searchSessionMessages("user:scopeNeedle", { dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_user"])
+
+      const patchResult = searchSessionMessages("patch:scopeNeedle", { dbPath, directory: dir, limit: 10 })[0]
+      expect(patchResult?.match).toBe("scopeNeedle")
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("migrates old sidecar tables without kind column before searching", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-old-kind-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const indexPath = searchIndexPath(dbPath)
+    const db = new Database(dbPath)
+    let index: Database | undefined = new Database(indexPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Old Sidecar", dir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "oldKindNeedle" }))
+
+      index.exec(`
+        CREATE TABLE index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE document(
+          rowid INTEGER PRIMARY KEY,
+          doc_id TEXT UNIQUE NOT NULL,
+          part_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          session_title TEXT NOT NULL,
+          directory TEXT NOT NULL,
+          role TEXT NOT NULL,
+          part_type TEXT NOT NULL,
+          tool TEXT,
+          time_created INTEGER NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          text TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          extractor_version TEXT NOT NULL,
+          indexed_at INTEGER NOT NULL
+        );
+        CREATE VIRTUAL TABLE document_fts USING fts5(
+          id UNINDEXED,
+          message_id UNINDEXED,
+          session_id UNINDEXED,
+          session_title,
+          directory UNINDEXED,
+          role UNINDEXED,
+          part_type UNINDEXED,
+          tool UNINDEXED,
+          time_created UNINDEXED,
+          text,
+          tokenize='unicode61'
+        );
+        CREATE TABLE document_index(
+          id TEXT PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          session_title TEXT NOT NULL,
+          directory TEXT NOT NULL,
+          role TEXT NOT NULL,
+          part_type TEXT NOT NULL,
+          tool TEXT,
+          time_created INTEGER NOT NULL,
+          text TEXT NOT NULL
+        );
+      `)
+      index.close()
+      index = undefined
+
+      expect(searchSessionMessages("oldKindNeedle", { dbPath, directory: dir, limit: 10 })).toEqual([])
+      rebuildKeywordIndexForDbPath(dbPath)
+      expect(searchSessionMessages("oldKindNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_1"])
+    } finally {
+      index?.close()
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }
@@ -597,21 +722,25 @@ describe("parseSemanticConfig", () => {
   test("uses defaults when env vars are missing", () => {
     const config = parseSemanticConfig({})
     expect(config.embedBaseUrl).toBe("http://127.0.0.1:8081")
-    expect(config.disableVector).toBe(false)
+    expect(config.disableVector).toBe(true)
     expect(config.hybridAlpha).toBe(0.45)
   })
 
   test("parses env overrides correctly", () => {
     const config = parseSemanticConfig({
       OPENCODE_TELESCOPE_EMBED_BASE_URL: "http://localhost:9090",
-      OPENCODE_TELESCOPE_DISABLE_VECTOR: "1",
+      OPENCODE_TELESCOPE_ENABLE_VECTOR: "1",
       OPENCODE_TELESCOPE_HYBRID_ALPHA: "0.7",
       OPENCODE_TELESCOPE_EMBED_MODEL: "custom-model",
     })
     expect(config.embedBaseUrl).toBe("http://localhost:9090")
-    expect(config.disableVector).toBe(true)
+    expect(config.disableVector).toBe(false)
     expect(config.hybridAlpha).toBe(0.7)
     expect(config.embedModel).toBe("custom-model")
+  })
+
+  test("disable vector override wins over enable vector", () => {
+    expect(parseSemanticConfig({ OPENCODE_TELESCOPE_ENABLE_VECTOR: "1", OPENCODE_TELESCOPE_DISABLE_VECTOR: "1" }).disableVector).toBe(true)
   })
 
   test("clamps hybridAlpha to [0, 1]", () => {
@@ -690,10 +819,12 @@ describe("performSearch", () => {
 
   test("returns keyword results when semantic query embedding times out", async () => {
     const originalFetch = globalThis.fetch
+    const originalEnv = process.env
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-perform-timeout-"))
     const dbPath = path.join(dir, "opencode.db")
     const db = new Database(dbPath)
     try {
+      process.env = { ...originalEnv, OPENCODE_TELESCOPE_ENABLE_VECTOR: "1" }
       db.exec(`
         CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
         CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
@@ -715,6 +846,7 @@ describe("performSearch", () => {
       expect(response.results.map((item) => item.id)).toEqual(["prt_1"])
     } finally {
       globalThis.fetch = originalFetch
+      process.env = originalEnv
       db.close()
       rmSync(dir, { recursive: true, force: true })
     }

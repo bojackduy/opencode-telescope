@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 
-export const SEARCH_INDEX_VERSION = "7"
+export const SEARCH_INDEX_VERSION = "8"
 export const DOCUMENT_EXTRACTOR_VERSION = "1"
 
 export function migrateSearchIndex(db: Database) {
@@ -19,6 +19,7 @@ export function migrateSearchIndex(db: Database) {
       session_id TEXT NOT NULL,
       session_title TEXT NOT NULL,
       directory TEXT NOT NULL,
+      kind TEXT NOT NULL,
       role TEXT NOT NULL,
       part_type TEXT NOT NULL,
       tool TEXT,
@@ -35,6 +36,7 @@ export function migrateSearchIndex(db: Database) {
       session_id UNINDEXED,
       session_title,
       directory UNINDEXED,
+      kind UNINDEXED,
       role UNINDEXED,
       part_type UNINDEXED,
       tool UNINDEXED,
@@ -48,22 +50,22 @@ export function migrateSearchIndex(db: Database) {
       session_id TEXT NOT NULL,
       session_title TEXT NOT NULL,
       directory TEXT NOT NULL,
+      kind TEXT NOT NULL,
       role TEXT NOT NULL,
       part_type TEXT NOT NULL,
       tool TEXT,
       time_created INTEGER NOT NULL,
       text TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS document_index_recent_idx
-      ON document_index(directory, role, time_created DESC);
-    CREATE INDEX IF NOT EXISTS document_index_recent_text_idx
-      ON document_index(directory, role, part_type, time_created DESC);
-    CREATE INDEX IF NOT EXISTS document_index_time_idx
-      ON document_index(time_created DESC);
   `)
 
+  const documentColumns = db.query<{ name: string }, []>("PRAGMA table_info(document)").all().map((column) => column.name)
+  if (!documentColumns.includes("kind")) {
+    db.exec("ALTER TABLE document ADD COLUMN kind TEXT NOT NULL DEFAULT 'assistant'")
+  }
+
   const columns = db.query<{ name: string }, []>("PRAGMA table_info(document_fts)").all().map((column) => column.name)
-  if (!columns.includes("part_type") || !columns.includes("tool")) {
+  if (!columns.includes("kind") || !columns.includes("part_type") || !columns.includes("tool")) {
     db.exec("DROP TABLE document_fts")
     db.exec(`
       CREATE VIRTUAL TABLE document_fts USING fts5(
@@ -72,6 +74,7 @@ export function migrateSearchIndex(db: Database) {
         session_id UNINDEXED,
         session_title,
         directory UNINDEXED,
+        kind UNINDEXED,
         role UNINDEXED,
         part_type UNINDEXED,
         tool UNINDEXED,
@@ -83,7 +86,7 @@ export function migrateSearchIndex(db: Database) {
   }
 
   const indexColumns = db.query<{ name: string }, []>("PRAGMA table_info(document_index)").all().map((column) => column.name)
-  if (!["part_type", "tool", "time_created", "text"].every((name) => indexColumns.includes(name))) {
+  if (!["kind", "part_type", "tool", "time_created", "text"].every((name) => indexColumns.includes(name))) {
     db.exec("DROP TABLE IF EXISTS document_index")
     db.exec(`
       CREATE TABLE document_index(
@@ -92,6 +95,7 @@ export function migrateSearchIndex(db: Database) {
         session_id TEXT NOT NULL,
         session_title TEXT NOT NULL,
         directory TEXT NOT NULL,
+        kind TEXT NOT NULL,
         role TEXT NOT NULL,
         part_type TEXT NOT NULL,
         tool TEXT,
@@ -105,6 +109,8 @@ export function migrateSearchIndex(db: Database) {
       ON document_index(directory, role, time_created DESC);
     CREATE INDEX IF NOT EXISTS document_index_recent_text_idx
       ON document_index(directory, role, part_type, time_created DESC);
+    CREATE INDEX IF NOT EXISTS document_index_kind_recent_idx
+      ON document_index(directory, kind, time_created DESC);
     CREATE INDEX IF NOT EXISTS document_index_time_idx
       ON document_index(time_created DESC);
   `)

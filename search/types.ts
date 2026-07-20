@@ -5,6 +5,7 @@ export type SearchResult = {
   sessionTitle: string
   directory: string
   role: "user" | "assistant"
+  kind?: SearchKind
   partType: "text" | "reasoning" | "tool"
   tool?: string
   timeCreated: number
@@ -26,6 +27,8 @@ export type SearchResult = {
 }
 
 export type SearchRole = "user" | "assistant"
+
+export type SearchKind = SearchRole | "thought" | "patch"
 
 export type ConversationPreviewPart = {
   id: string
@@ -103,6 +106,7 @@ export type DocumentRow = {
   session_title: string
   directory: string
   role: string
+  kind: SearchKind
   part_type: string
   tool: string | null
   time_created: number
@@ -119,6 +123,7 @@ export type Row = {
   session_title: string | null
   directory: string
   role: SearchRole
+  kind?: SearchKind
   part_type?: SearchResult["partType"]
   tool?: string | null
   time_created: number

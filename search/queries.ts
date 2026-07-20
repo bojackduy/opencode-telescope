@@ -18,6 +18,7 @@ import type {
   VectorState,
 } from "./types.ts"
 import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery, expandQuery } from "./text.ts"
+import { parseSearchQuery, type ParsedSearchQuery } from "./query.ts"
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
@@ -49,15 +50,15 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
 }
 
 export function searchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
-  const term = query.trim()
-  if (!term) return searchResponse([], "ready")
+  const parsed = parseSearchQuery(query)
+  if (!parsed.term) return searchResponse([], "ready")
   if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
   const index = openSearchIndex(dbPath)
   const status = readKeywordIndexState(db, index, dbPath)
-  const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, term, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
-  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, term) ?? []), status.state, getVectorState(index))
+  const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
+  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, parsed.term) ?? []), status.state, getVectorState(index))
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
@@ -269,8 +270,8 @@ export async function semanticSearchSessionMessages(query: string, options?: { l
 }
 
 export async function semanticSearchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): Promise<SearchResponse> {
-  const term = query.trim()
-  if (!term) return searchResponse([], "ready")
+  const parsed = parseSearchQuery(query)
+  if (!parsed.term) return searchResponse([], "ready")
   if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
@@ -280,19 +281,19 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
 
   const index = openSearchIndex(dbPath)
   const status = readKeywordIndexState(db, index, dbPath)
-  const keyword = canQueryKeywordIndex(status.state) ? queryFtsRows(index, term, limit, dir, options?.offset, role) : []
+  const keyword = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, limit, dir, options?.offset, role) : []
   const config = parseSemanticConfig()
   let vectorState = getVectorState(index)
 
   let vector: Row[] = []
-  if (!config.disableVector && isVectorReady(index)) {
+  if (!parsed.explicitScope && !config.disableVector && isVectorReady(index)) {
       try {
         const indexPath = searchIndexPath(dbPath)
         await withDeadline(vecExtensionLoading.get(indexPath) ?? Promise.resolve(), 250)
-        const embedTerm = expandQuery(term)
+        const embedTerm = expandQuery(parsed.term)
         const embedding = await withDeadline(embedQuery(config, embedTerm), 1200)
         vector = searchVector(index, embedding, limit)
-        debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== term ? embedTerm : undefined })
+        debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== parsed.term ? embedTerm : undefined })
       } catch (err) {
         debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
         vectorState = getVectorState(index)
@@ -306,7 +307,7 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
   const results: SearchResult[] = []
   const seen = new Set<string>()
   for (const row of merged) {
-    const result = rowToSearchResult(row, term) ?? rowToVectorResult(row, row.vectorScore)
+    const result = rowToSearchResult(row, parsed.term) ?? rowToVectorResult(row, row.vectorScore)
     if (result) {
       seen.add(row.id)
       results.push(result)
@@ -315,7 +316,7 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
 
   for (const row of vector) {
     if (!seen.has(row.id)) {
-      const result = rowToSearchResult(row, term) ?? rowToVectorResult(row)
+      const result = rowToSearchResult(row, parsed.term) ?? rowToVectorResult(row)
       if (result) results.push(result)
     }
   }
@@ -406,12 +407,20 @@ export function readKeywordIndexState(source: Database, index: Database, sourceP
   }
 }
 
-function queryFtsRows(index: Database, query: string, limit: number, directory?: string, offset?: number, role?: SearchRole) {
-  const match = ftsQuery(query)
+function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, directory?: string, offset?: number, role?: SearchRole) {
+  const match = ftsQuery(query.term)
   if (!match) return []
   const conditions = ["document_fts MATCH ?"]
   const params: (string | number)[] = [match]
-  if (role) {
+  if (query.kind) {
+    conditions.push("kind = ?")
+    params.push(query.kind)
+  }
+  if (query.tool) {
+    conditions.push("tool = ?")
+    params.push(query.tool)
+  }
+  if (role && !query.explicitScope) {
     conditions.push("role = ?")
     params.push(role)
   }
@@ -424,7 +433,7 @@ function queryFtsRows(index: Database, query: string, limit: number, directory?:
   const offsetClause = offset ? "OFFSET ?" : ""
   debug.time("query:fts:exec")
   const rows = index.query<Row, (string | number)[]>(`
-    SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
+    SELECT id, message_id, session_id, session_title, directory, kind, role, part_type, tool,
            CAST(time_created AS INTEGER) AS time_created, text
     FROM document_fts
     WHERE ${conditions.join(" AND ")}
@@ -436,7 +445,7 @@ function queryFtsRows(index: Database, query: string, limit: number, directory?:
 }
 
 function queryRecentRows(index: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {
-  const conditions: string[] = ["part_type = 'text'"]
+  const conditions: string[] = ["kind IN ('user', 'assistant')"]
   const params: (string | number)[] = []
   if (role) {
     conditions.push("role = ?")
@@ -453,7 +462,7 @@ function queryRecentRows(index: Database, limit: number, directory?: string, off
   const offsetClause = offset ? "OFFSET ?" : ""
   debug.time("query:recent:index:exec")
   const rows = index.query<Row, (string | number)[]>(`
-    SELECT id, message_id, session_id, session_title, directory, role, part_type, tool,
+    SELECT id, message_id, session_id, session_title, directory, kind, role, part_type, tool,
            CAST(time_created AS INTEGER) AS time_created, text
     FROM document_index
     ${where}
@@ -495,6 +504,7 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
     JOIN session s ON s.id = p.session_id
     WHERE (
         json_extract(p.data, '$.type') = 'text'
+        OR json_extract(p.data, '$.type') = 'reasoning'
         OR (
           json_extract(p.data, '$.type') = 'tool'
           AND json_extract(p.data, '$.tool') IN ('apply_patch', 'edit', 'write')
@@ -505,17 +515,17 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
   `).all()
   const now = Date.now()
   const config = parseSemanticConfig()
-  const insertDoc = index.query<unknown, [string, string, string, string, string, string, string, string, string | null, number, number, string, string, string, number]>(`
-    INSERT INTO document(doc_id, part_id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, chunk_index, text, source_hash, extractor_version, indexed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const insertDoc = index.query<unknown, [string, string, string, string, string, string, string, string, string, string | null, number, number, string, string, string, number]>(`
+    INSERT INTO document(doc_id, part_id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, chunk_index, text, source_hash, extractor_version, indexed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
-  const insertFts = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
-    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const insertFts = index.query<Row, [string, string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
+    INSERT INTO document_fts(id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
-  const insertIndex = index.query<Row, [string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
-    INSERT INTO document_index(id, message_id, session_id, session_title, directory, role, part_type, tool, time_created, text)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const insertIndex = index.query<Row, [string, string, string, string, string, string, string, SearchResult["partType"], string | null, number, string]>(`
+    INSERT INTO document_index(id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
   index.exec("BEGIN IMMEDIATE")
   try {
@@ -533,6 +543,7 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
         row.session_id,
         row.session_title ?? "Untitled session",
         row.directory,
+        row.kind ?? "assistant",
         row.role,
         row.part_type ?? "text",
         row.tool ?? null,
@@ -549,6 +560,7 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
         row.session_id,
         row.session_title ?? "Untitled session",
         row.directory,
+        row.kind ?? "assistant",
         row.role,
         row.part_type ?? "text",
         row.tool ?? null,
@@ -561,6 +573,7 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
         row.session_id,
         row.session_title ?? "Untitled session",
         row.directory,
+        row.kind ?? "assistant",
         row.role,
         row.part_type ?? "text",
         row.tool ?? null,
@@ -719,10 +732,11 @@ function countBy<T>(items: T[], key: (item: T) => string) {
 }
 
 export function parseSemanticConfig(env: Record<string, string | undefined> = process.env): SemanticConfig {
+  const vectorEnabled = env.OPENCODE_TELESCOPE_ENABLE_VECTOR === "1" || env.OPENCODE_TELESCOPE_ENABLE_VECTOR === "true"
   return {
     embedBaseUrl: env.OPENCODE_TELESCOPE_EMBED_BASE_URL ?? "http://127.0.0.1:8081",
     embedModel: env.OPENCODE_TELESCOPE_EMBED_MODEL || undefined,
-    disableVector: env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "1" || env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "true",
+    disableVector: !vectorEnabled || env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "1" || env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "true",
     sqliteLibPath: env.OPENCODE_TELESCOPE_SQLITE_LIB || undefined,
     sqliteVecExtension: env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT || undefined,
     hybridAlpha: parseAlpha(env.OPENCODE_TELESCOPE_HYBRID_ALPHA),

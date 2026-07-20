@@ -59,7 +59,7 @@ export function searchVector(index: Database, embedding: Float32Array, limit: nu
   if (!count) return []
   const k = Math.min(count, Math.max(limit * 4, 200))
   return index.query<Row, [Float32Array, number]>(`
-    SELECT d.part_id AS id, d.message_id, d.session_id, d.session_title, d.directory, d.role,
+    SELECT d.part_id AS id, d.message_id, d.session_id, d.session_title, d.directory, d.kind, d.role,
            d.part_type, d.tool, CAST(d.time_created AS INTEGER) AS time_created, d.text
     FROM document_vec v
     JOIN document d ON d.rowid = v.rowid
@@ -207,6 +207,9 @@ async function rebuildVectorIndex(indexPath: string, config: SemanticConfig) {
 }
 
 export async function loadVecExtension(db: Database): Promise<boolean> {
+  const config = parseSemanticConfigForVector()
+  if (config.disableVector) return false
+
   try {
     const sqliteVec = await importPackage("sqlite-vec").catch(() => undefined)
     if (sqliteVec?.load) {
@@ -218,7 +221,6 @@ export async function loadVecExtension(db: Database): Promise<boolean> {
     debug.log("vector:extension:npm-failed")
   }
 
-  const config = parseSemanticConfigForVector()
   const explicitPath = config.sqliteVecExtension || process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT
   if (explicitPath && existsSync(explicitPath)) {
     try {
@@ -238,8 +240,9 @@ function importPackage(specifier: string) {
 }
 
 function parseSemanticConfigForVector(): { disableVector: boolean; sqliteLibPath?: string; sqliteVecExtension?: string; embedBaseUrl: string; embedModel?: string; documentPrefix: string; queryPrefix: string } {
+  const vectorEnabled = process.env.OPENCODE_TELESCOPE_ENABLE_VECTOR === "1" || process.env.OPENCODE_TELESCOPE_ENABLE_VECTOR === "true"
   return {
-    disableVector: process.env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "1" || process.env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "true",
+    disableVector: !vectorEnabled || process.env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "1" || process.env.OPENCODE_TELESCOPE_DISABLE_VECTOR === "true",
     sqliteLibPath: process.env.OPENCODE_TELESCOPE_SQLITE_LIB || undefined,
     sqliteVecExtension: process.env.OPENCODE_TELESCOPE_SQLITE_VEC_EXT || undefined,
     embedBaseUrl: process.env.OPENCODE_TELESCOPE_EMBED_BASE_URL ?? "http://127.0.0.1:8081",

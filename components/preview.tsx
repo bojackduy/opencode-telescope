@@ -3,6 +3,7 @@ import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { SyntaxStyle } from "@opentui/core"
 import { For, Show, createMemo } from "solid-js"
 import type { ConversationPreviewPart, SearchResult } from "../search.ts"
+import { searchQueryLabel } from "../search/query.ts"
 import {
   compactTime,
   markdownWithMatch,
@@ -49,7 +50,7 @@ export const PreviewHeader = (props: { item: SearchResult | undefined; query: st
           <Show when={props.query.trim()}>
             <box width="100%" flexShrink={0}>
               <text fg={props.theme.textMuted} wrapMode="none" overflow="hidden">
-                {item().isVectorMatch ? "~semantic: " : "match: "}{props.query.trim()}
+                {item().isVectorMatch ? "~semantic: " : searchQueryLabel(props.query)}
               </text>
             </box>
           </Show>

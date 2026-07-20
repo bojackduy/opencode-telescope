@@ -7,6 +7,7 @@ export type {
   ConversationPreviewCursor,
   ToolState,
   SemanticConfig,
+  SearchKind,
   KeywordIndexState,
   VectorState,
   SearchResponse,
@@ -14,6 +15,15 @@ export type {
   ScoredRow,
   HybridSearchOptions,
 } from "./search/types.ts"
+
+export {
+  parseSearchQuery,
+  searchQueryLabel,
+} from "./search/query.ts"
+
+export type {
+  ParsedSearchQuery,
+} from "./search/query.ts"
 
 // Re-exported query functions
 export {

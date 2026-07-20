@@ -87,6 +87,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     `${keyListLabel(props.config.keys.scrollPreviewDown)}/${keyListLabel(props.config.keys.scrollPreviewUp)} scroll`,
     `${keyListLabel(props.config.keys.toggleOwner)} owner`,
     `${keyListLabel(props.config.keys.insertMode)} search`,
+    "scope user:/assistant:/thought:/patch:",
     `${keyListLabel(props.config.keys.open)} open`,
     `${keyListLabel(props.config.keys.close)} close`,
   ])
@@ -1407,7 +1408,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               <box flexDirection="row" gap={1} flexShrink={0}>
                 <input
                   ref={(element: InputRenderable) => (input = element)}
-                  placeholder="grep conversations..."
+                  placeholder="grep conversations... try user:timeout or patch:SearchResponse"
                   placeholderColor={theme().textMuted}
                   cursorColor={theme().primary}
                   focusedTextColor={theme().text}
@@ -1523,7 +1524,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
                 <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().normalMode)} normal</text>
+                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().normalMode)} normal · scopes user: assistant: thought: patch: tool:name</text>
               </box>
             </Show>
 

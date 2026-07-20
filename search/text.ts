@@ -1,4 +1,4 @@
-import type { IndexSourceRow, Row, SearchResult } from "./types.ts"
+import type { IndexSourceRow, Row, SearchKind, SearchResult } from "./types.ts"
 
 export function rowToSearchResult(row: Row, query: string): SearchResult | undefined {
   const text = row.text.trim()
@@ -12,6 +12,7 @@ export function rowToSearchResult(row: Row, query: string): SearchResult | undef
     sessionTitle: row.session_title || "Untitled session",
     directory: row.directory,
     role: row.role,
+    kind: row.kind,
     partType: row.part_type ?? "text",
     tool: row.tool ?? undefined,
     timeCreated: row.time_created,
@@ -44,6 +45,7 @@ export function rowToVectorResult(row: Row, vectorScore = 0): SearchResult | und
     sessionTitle: row.session_title || "Untitled session",
     directory: row.directory,
     role: row.role,
+    kind: row.kind,
     partType: row.part_type ?? "text",
     tool: row.tool ?? undefined,
     timeCreated: row.time_created,
@@ -97,7 +99,7 @@ export function extractIndexText(data: string) {
     const value = JSON.parse(data) as unknown
     if (!value || typeof value !== "object" || Array.isArray(value)) return ""
     const record = value as Record<string, unknown>
-    if (record.type === "text") return typeof record.text === "string" ? record.text.trim() : ""
+    if (record.type === "text" || record.type === "reasoning") return typeof record.text === "string" ? record.text.trim() : ""
     if (record.type !== "tool") return ""
     return extractToolIndexText(record).replace(/\s+/g, " ").trim()
   } catch {
@@ -108,7 +110,13 @@ export function extractIndexText(data: string) {
 export function indexSourceRowToRows(row: IndexSourceRow): Row[] {
   const text = extractIndexText(row.data)
   if (!text) return []
-  return [{ ...row, text }]
+  return [{ ...row, kind: searchKindForRow(row), text }]
+}
+
+function searchKindForRow(row: IndexSourceRow): SearchKind {
+  if (row.part_type === "tool") return "patch"
+  if (row.part_type === "reasoning") return "thought"
+  return row.role === "user" ? "user" : "assistant"
 }
 
 export function ftsQuery(query: string) {
