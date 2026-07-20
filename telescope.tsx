@@ -15,6 +15,7 @@ import {
   recentSessionMessages,
   recentSessionMessagesWithStatus,
   resolveDatabasePath,
+  searchQueryHint,
   searchSessionMessages,
   searchSessionMessagesWithStatus,
   type ConversationPreviewPart,
@@ -78,6 +79,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const ownerRole = createMemo(() => ownerFilter() === "all" ? undefined : ownerFilter() as SearchRole)
   const ownerLabel = createMemo(() => ownerFilter() === "user" ? "you" : ownerFilter())
   const parsedQuery = createMemo(() => parseSearchQuery(query()))
+  const searchHint = createMemo(() => searchQueryHint(query()))
   const ownerStatusLabel = createMemo(() => parsedQuery().explicitScope ? "scoped" : ownerLabel())
   const inputKeys = createMemo(() => ({
     moveDown: inputSafeKeys(props.config.keys.moveDown),
@@ -91,7 +93,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     `${keyListLabel(props.config.keys.scrollPreviewDown)}/${keyListLabel(props.config.keys.scrollPreviewUp)} scroll`,
     `${keyListLabel(props.config.keys.toggleOwner)} owner`,
     `${keyListLabel(props.config.keys.insertMode)} search`,
-    "scope user:/assistant:/thought:/patch:",
     `${keyListLabel(props.config.keys.open)} open`,
     `${keyListLabel(props.config.keys.close)} close`,
   ])
@@ -1412,7 +1413,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               <box flexDirection="row" gap={1} flexShrink={0}>
                 <input
                   ref={(element: InputRenderable) => (input = element)}
-                  placeholder="grep conversations... try user:timeout or patch:SearchResponse"
+                  placeholder="Search conversations..."
                   placeholderColor={theme().textMuted}
                   cursorColor={theme().primary}
                   focusedTextColor={theme().text}
@@ -1444,6 +1445,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                 />
                 <text fg={theme().textMuted}>{busy() ? `searching ${ownerStatusLabel()}` : loading() ? `loading ${ownerStatusLabel()}` : query().trim() ? (results().length > 0 ? `${ownerStatusLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerStatusLabel()} 0 hits`) + (query().trim() ? ` [${searchMode()}]` : "") : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
               </box>
+              <text fg={theme().textMuted} wrapMode="none" overflow="hidden">{searchHint()}</text>
             </box>
 
             <box flexDirection="row" flexGrow={1} minHeight={0}>
@@ -1533,7 +1535,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
                 <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().toggleOwner)} owner · {keyListLabel(inputKeys().normalMode)} normal · scopes user: assistant: thought: patch: tool:name</text>
+                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().toggleOwner)} owner · {keyListLabel(inputKeys().normalMode)} normal</text>
               </box>
             </Show>
 

@@ -18,6 +18,7 @@ export type {
 
 export {
   parseSearchQuery,
+  searchQueryHint,
   searchQueryLabel,
 } from "./search/query.ts"
 

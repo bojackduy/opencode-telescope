@@ -44,6 +44,8 @@ describe("searchQueryHint", () => {
 
   test("explains in scope prefixes", () => {
     expect(searchQueryHint("in:")).toBe("in:<scope> <term> supports user, assistant, thought, and patch.")
+    expect(searchQueryHint("in:user")).toBe("in:user <term> searches only your prompts.")
+    expect(searchQueryHint("in:thought")).toBe("in:thought <term> searches assistant reasoning/thought parts.")
     expect(searchQueryHint("in:patch")).toBe("in:patch <term> searches code edits, patches, and changed file names.")
   })
 
