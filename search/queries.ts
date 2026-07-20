@@ -420,6 +420,9 @@ function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, 
     conditions.push("tool = ?")
     params.push(query.tool)
   }
+  if (!query.explicitScope) {
+    conditions.push("kind IN ('user', 'assistant')")
+  }
   if (role && !query.explicitScope) {
     conditions.push("role = ?")
     params.push(role)

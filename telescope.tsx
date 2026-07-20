@@ -9,6 +9,7 @@ import {
   loadConversationAfter,
   loadConversationAround,
   loadConversationBefore,
+  parseSearchQuery,
   parseSemanticConfig,
   performSearch,
   recentSessionMessages,
@@ -76,11 +77,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const syntax = createMemo(() => syntaxStyle(theme()))
   const ownerRole = createMemo(() => ownerFilter() === "all" ? undefined : ownerFilter() as SearchRole)
   const ownerLabel = createMemo(() => ownerFilter() === "user" ? "you" : ownerFilter())
+  const parsedQuery = createMemo(() => parseSearchQuery(query()))
+  const ownerStatusLabel = createMemo(() => parsedQuery().explicitScope ? "scoped" : ownerLabel())
   const inputKeys = createMemo(() => ({
     moveDown: inputSafeKeys(props.config.keys.moveDown),
     moveUp: inputSafeKeys(props.config.keys.moveUp),
     open: inputSafeKeys(props.config.keys.open),
     normalMode: inputSafeKeys(props.config.keys.normalMode),
+    toggleOwner: inputSafeKeys([...props.config.keys.toggleOwner, "ctrl+o"]),
   }))
   const normalHelpItems = createMemo(() => [
     `${keyListLabel(props.config.keys.moveUp)}/${keyListLabel(props.config.keys.moveDown)} move`,
@@ -1425,6 +1429,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                       open()
                       return
                     }
+                    if (matchesKey(evt, inputKeys().toggleOwner)) {
+                      prevent(evt)
+                      toggleOwnerFilter()
+                      return
+                    }
                     if (matchesKey(evt, inputKeys().normalMode)) {
                       prevent(evt)
                       setMode("normal")
@@ -1433,7 +1442,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                   }}
                   flexGrow={1}
                 />
-                <text fg={theme().textMuted}>{busy() ? `searching ${ownerLabel()}` : loading() ? `loading ${ownerLabel()}` : query().trim() ? (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerLabel()} 0 hits`) + (query().trim() ? ` [${searchMode()}]` : "") : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
+                <text fg={theme().textMuted}>{busy() ? `searching ${ownerStatusLabel()}` : loading() ? `loading ${ownerStatusLabel()}` : query().trim() ? (results().length > 0 ? `${ownerStatusLabel()} ${selected() + 1}/${nextResultOffset()} hits` : `${ownerStatusLabel()} 0 hits`) + (query().trim() ? ` [${searchMode()}]` : "") : (results().length > 0 ? `${ownerLabel()} ${selected() + 1}/${nextResultOffset()} recent` : `${ownerLabel()} 0 recent`)}</text>
               </box>
             </box>
 
@@ -1450,7 +1459,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                     }
                   >
                     <Show when={!loading()}>
-                      <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerLabel()} theme={theme()} keywordIndexState={keywordIndexState()} />}>
+                      <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerStatusLabel()} theme={theme()} keywordIndexState={keywordIndexState()} />}>
                         <box height={resultTopSpacerHeight()} flexShrink={0} />
                         <For each={resultRenderWindow().items}>
                           {(item, index) => {
@@ -1524,7 +1533,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               <box paddingLeft={4} paddingRight={4} flexDirection="row" backgroundColor={theme().backgroundElement} gap={2}>
                 <text fg={theme().warning}><span style={{ bold: true }}>INSERT</span></text>
                 <text fg={theme().textMuted}>·</text>
-                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().normalMode)} normal · scopes user: assistant: thought: patch: tool:name</text>
+                <text fg={theme().textMuted}>{keyListLabel(inputKeys().moveUp)}/{keyListLabel(inputKeys().moveDown)} move · {keyListLabel(inputKeys().toggleOwner)} owner · {keyListLabel(inputKeys().normalMode)} normal · scopes user: assistant: thought: patch: tool:name</text>
               </box>
             </Show>
 

@@ -1,8 +1,8 @@
 # opencode-telescope
 
-OpenCode TUI plugin for fuzzy and semantic search across local conversation history, session transcripts, and past AI coding chats.
+OpenCode TUI plugin for fast keyword search across local conversation history, session transcripts, and past AI coding chats.
 
-Install the npm package `@bojackduy/opencode-telescope` to grep OpenCode chat history, find old code snippets, search by meaning with local embeddings, and jump back to any session instantly.
+Install the npm package `@bojackduy/opencode-telescope` to grep OpenCode chat history, find old code snippets, scope searches to user asks / assistant replies / thoughts / patches, and jump back to any session instantly.
 
 > Inspired by [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — a fuzzy finder for your conversation history.
 
@@ -18,16 +18,17 @@ Install the npm package `@bojackduy/opencode-telescope` to grep OpenCode chat hi
 ## Use cases
 
 - **"I know I discussed this somewhere"** — grep all your sessions by keyword
-- **"What was that auth caching idea?"** — semantic search can find related chats even when the exact words differ
+- **"What did I ask about auth caching?"** — scope search to only your prompts with `user:auth caching`
 - **"Find that code snippet"** — search for code you saw in a past LLM response
+- **"Find that patch"** — scope search to edits and patches with `patch:validateForSubmit`
 - **"Revisit a decision"** — find the conversation where you chose approach X
 - **"Session journal"** — browse your entire conversation history like a timeline
 
 ## Features
 
-- **Fuzzy grep** — search across all session messages by text
-- **Semantic memory search** — optional local vector search with `llama-server` embeddings and `sqlite-vec`
-- **Hybrid ranking** — blends keyword/FTS matches with semantic vector results when vector search is ready
+- **Fuzzy grep** — fast sidecar FTS search across your prompts and assistant replies
+- **Scoped queries** — opt into noisier fields with `thought:`, `patch:`, or `tool:name`, or narrow with `user:` and `assistant:`
+- **Semantic memory search** — optional opt-in local vector search with `llama-server` embeddings and `sqlite-vec`
 - **Live preview** — preview the matched conversation result before opening
 - **Find & jump** — select any result and jump straight to that session
 - **Neovim Telescope-style UX** — familiar `<leader>f` keybind and `/telescope` command
@@ -62,9 +63,24 @@ Add the plugin to your `tui.json`:
 | Open             | Press `Enter` to jump to the selected session   |
 | Owner filter     | Press `o` to cycle `all` / `you` / `assistant`  |
 
+## Scoped Search Queries
+
+Telescope defaults to fast keyword search across user prompts and assistant replies only. Thoughts, patches, file names inside patches, and tool output are intentionally excluded from bare search so normal typing stays low-noise. Add a scope prefix when you want those fields:
+
+| Query | Searches |
+| --- | --- |
+| `user:timeout` | Your prompts only |
+| `assistant:timeout` | Assistant replies only |
+| `thought:indexing` | Assistant reasoning/thought parts |
+| `patch:SearchResponse` | Code edits from `apply_patch`, `edit`, and `write` tools |
+| `in:patch SEARCH_WORKER_TIMEOUT_MS` | Same as `patch:...`, useful when you prefer `in:<scope>` |
+| `tool:apply_patch SearchResponse` | A specific tool's indexed content |
+
+Scoped queries highlight only the searched term, so `patch:SearchResponse` highlights `SearchResponse`, not the `patch:` prefix. Explicit scopes override the owner filter.
+
 ## Semantic Search
 
-Semantic search is optional. Keyword and fuzzy search work out of the box; when vector dependencies are available, Telescope builds a local sidecar vector index and uses hybrid ranking so meaning-based matches can appear even when the query does not share exact words with the original chat.
+Semantic search is optional and opt-in. Keyword and scoped search work out of the box; set `OPENCODE_TELESCOPE_ENABLE_VECTOR=1` to enable the local vector path.
 
 The semantic path stays local-first:
 
@@ -94,7 +110,7 @@ llama-server \
   --port 8081
 ```
 
-Then launch OpenCode normally. Telescope uses `http://127.0.0.1:8081` by default and will rebuild the vector sidecar from your local session history.
+Then launch OpenCode with `OPENCODE_TELESCOPE_ENABLE_VECTOR=1`. Telescope uses `http://127.0.0.1:8081` by default and will rebuild the vector sidecar from your local session history.
 
 Useful environment variables:
 
@@ -102,6 +118,7 @@ Useful environment variables:
 OPENCODE_TELESCOPE_EMBED_BASE_URL=http://127.0.0.1:8081
 OPENCODE_TELESCOPE_EMBED_MODEL=nomic-embed-text-v1.5
 OPENCODE_TELESCOPE_HYBRID_ALPHA=0.45
+OPENCODE_TELESCOPE_ENABLE_VECTOR=1
 OPENCODE_TELESCOPE_DISABLE_VECTOR=1
 OPENCODE_TELESCOPE_SQLITE_LIB=/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib
 OPENCODE_TELESCOPE_SQLITE_VEC_EXT=/path/to/vec0

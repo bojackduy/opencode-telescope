@@ -274,7 +274,8 @@ describe("session search helpers", () => {
         }))
 
       rebuildKeywordIndexForDbPath(dbPath)
-      const results = searchSessionMessages("validateForSubmit", { dbPath, directory: dir, limit: 10 })
+      expect(searchSessionMessages("validateForSubmit", { dbPath, directory: dir, limit: 10 })).toEqual([])
+      const results = searchSessionMessages("patch:validateForSubmit", { dbPath, directory: dir, limit: 10 })
       expect(results.map((item) => item.id)).toEqual(["prt_patch"])
       expect(results[0]?.text).toContain("validateForSubmit")
     } finally {
@@ -315,6 +316,11 @@ describe("session search helpers", () => {
 
       rebuildKeywordIndexForDbPath(dbPath)
 
+      const defaultIDs = searchSessionMessages("scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)
+      expect(defaultIDs).toContain("prt_user")
+      expect(defaultIDs).toContain("prt_assistant")
+      expect(defaultIDs).not.toContain("prt_thought")
+      expect(defaultIDs).not.toContain("prt_patch")
       expect(searchSessionMessages("user:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_user"])
       expect(searchSessionMessages("assistant:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_assistant"])
       expect(searchSessionMessages("thought:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_thought"])
@@ -441,8 +447,8 @@ describe("session search helpers", () => {
       }
 
       rebuildKeywordIndexForDbPath(dbPath)
-      const first = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10 })
-      const second = searchSessionMessages("paginatedPatchNeedle", { dbPath, directory: dir, limit: 10, offset: 10 })
+      const first = searchSessionMessages("patch:paginatedPatchNeedle", { dbPath, directory: dir, limit: 10 })
+      const second = searchSessionMessages("patch:paginatedPatchNeedle", { dbPath, directory: dir, limit: 10, offset: 10 })
       expect(first).toHaveLength(10)
       expect(second).toHaveLength(10)
       expect(first[0]?.id).toBe("prt_patch_34")
@@ -502,7 +508,7 @@ describe("session search helpers", () => {
         }))
 
       rebuildKeywordIndexForDbPath(dbPath)
-      const results = searchSessionMessages("collisionSafePatchNeedle", { dbPath, directory: dir, limit: 10 })
+      const results = searchSessionMessages("patch:collisionSafePatchNeedle", { dbPath, directory: dir, limit: 10 })
       expect(results.map((item) => item.id)).toEqual(["prt_patch"])
     } finally {
       conflict.close()
