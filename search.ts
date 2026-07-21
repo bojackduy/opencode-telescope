@@ -24,6 +24,7 @@ export {
 
 export type {
   ParsedSearchQuery,
+  SearchQueryClause,
 } from "./search/query.ts"
 
 // Re-exported query functions

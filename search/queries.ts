@@ -18,7 +18,7 @@ import type {
   VectorState,
 } from "./types.ts"
 import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery, expandQuery } from "./text.ts"
-import { parseSearchQuery, type ParsedSearchQuery } from "./query.ts"
+import { parseSearchQuery, type ParsedSearchQuery, type SearchQueryClause } from "./query.ts"
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
@@ -58,7 +58,7 @@ export function searchSessionMessagesWithStatus(query: string, options?: { limit
   const index = openSearchIndex(dbPath)
   const status = readKeywordIndexState(db, index, dbPath)
   const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
-  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, parsed.term) ?? []), status.state, getVectorState(index))
+  return searchResponse(rows.flatMap((row) => rowToSearchResult(row, row.matchTerm ?? parsed.term) ?? []), status.state, getVectorState(index))
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
@@ -307,7 +307,7 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
   const results: SearchResult[] = []
   const seen = new Set<string>()
   for (const row of merged) {
-    const result = rowToSearchResult(row, parsed.term) ?? rowToVectorResult(row, row.vectorScore)
+    const result = rowToSearchResult(row, row.matchTerm ?? parsed.term) ?? rowToVectorResult(row, row.vectorScore)
     if (result) {
       seen.add(row.id)
       results.push(result)
@@ -316,7 +316,7 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
 
   for (const row of vector) {
     if (!seen.has(row.id)) {
-      const result = rowToSearchResult(row, parsed.term) ?? rowToVectorResult(row)
+      const result = rowToSearchResult(row, row.matchTerm ?? parsed.term) ?? rowToVectorResult(row)
       if (result) results.push(result)
     }
   }
@@ -407,23 +407,51 @@ export function readKeywordIndexState(source: Database, index: Database, sourceP
   }
 }
 
-function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, directory?: string, offset?: number, role?: SearchRole) {
-  const match = ftsQuery(query.term)
+type MatchedRow = Row & {
+  rank: number
+  matchTerm: string
+  clauseIndex: number
+  clauseRowIndex: number
+}
+
+function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, directory?: string, offset?: number, role?: SearchRole): MatchedRow[] {
+  const clauses = query.clauses.filter((clause) => clause.term.trim())
+  if (!clauses.length) return []
+  if (clauses.length === 1) return queryFtsClause(index, clauses[0]!, limit, directory, offset, role, query.explicitScope, 0)
+
+  const fetchLimit = limit + (offset ?? 0)
+  const merged = new Map<string, MatchedRow>()
+  for (const [clauseIndex, clause] of clauses.entries()) {
+    for (const row of queryFtsClause(index, clause, fetchLimit, directory, undefined, role, query.explicitScope, clauseIndex)) {
+      const existing = merged.get(row.id)
+      if (!existing || row.rank < existing.rank || (row.rank === existing.rank && row.time_created > existing.time_created)) {
+        merged.set(row.id, row)
+      }
+    }
+  }
+
+  return [...merged.values()]
+    .sort((a, b) => a.rank - b.rank || b.time_created - a.time_created || a.clauseIndex - b.clauseIndex || a.clauseRowIndex - b.clauseRowIndex)
+    .slice(offset ?? 0, (offset ?? 0) + limit)
+}
+
+function queryFtsClause(index: Database, clause: SearchQueryClause, limit: number, directory?: string, offset?: number, role?: SearchRole, hasExplicitScope = false, clauseIndex = 0) {
+  const match = ftsQuery(clause.term)
   if (!match) return []
   const conditions = ["document_fts MATCH ?"]
   const params: (string | number)[] = [match]
-  if (query.kind) {
+  if (clause.kind) {
     conditions.push("kind = ?")
-    params.push(query.kind)
+    params.push(clause.kind)
   }
-  if (query.tool) {
+  if (clause.tool) {
     conditions.push("tool = ?")
-    params.push(query.tool)
+    params.push(clause.tool)
   }
-  if (!query.explicitScope) {
+  if (!clause.kind && !clause.tool) {
     conditions.push("kind IN ('user', 'assistant')")
   }
-  if (role && !query.explicitScope) {
+  if (role && !hasExplicitScope) {
     conditions.push("role = ?")
     params.push(role)
   }
@@ -435,16 +463,16 @@ function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, 
   if (offset) params.push(offset)
   const offsetClause = offset ? "OFFSET ?" : ""
   debug.time("query:fts:exec")
-  const rows = index.query<Row, (string | number)[]>(`
+  const rows = index.query<Row & { rank: number }, (string | number)[]>(`
     SELECT id, message_id, session_id, session_title, directory, kind, role, part_type, tool,
-           CAST(time_created AS INTEGER) AS time_created, text
+           CAST(time_created AS INTEGER) AS time_created, text, bm25(document_fts) AS rank
     FROM document_fts
     WHERE ${conditions.join(" AND ")}
-    ORDER BY bm25(document_fts), CAST(time_created AS INTEGER) DESC
+    ORDER BY rank, CAST(time_created AS INTEGER) DESC
     LIMIT ? ${offsetClause}
   `).all(...params as any[])
   debug.timeEnd("query:fts:exec")
-  return rows
+  return rows.map((row, clauseRowIndex) => ({ ...row, matchTerm: clause.term, clauseIndex, clauseRowIndex }))
 }
 
 function queryRecentRows(index: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {

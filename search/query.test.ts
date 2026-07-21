@@ -18,6 +18,55 @@ describe("parseSearchQuery", () => {
     expect(parseSearchQuery("tool:apply_patch SearchResponse")).toMatchObject({ term: "SearchResponse", tool: "apply_patch", explicitScope: true })
   })
 
+  test("parses one-line mixed clauses with OR semantics", () => {
+    expect(parseSearchQuery("timeout user:auth patch:SearchResponse")).toMatchObject({
+      term: "timeout auth SearchResponse",
+      explicitScope: true,
+      clauses: [
+        { term: "timeout" },
+        { term: "auth", kind: "user" },
+        { term: "SearchResponse", kind: "patch" },
+      ],
+    })
+  })
+
+  test("keeps following bare tokens inside the current scope", () => {
+    expect(parseSearchQuery("patch:SearchResponse kind")).toMatchObject({
+      term: "SearchResponse kind",
+      kind: "patch",
+      explicitScope: true,
+      clauses: [{ term: "SearchResponse kind", kind: "patch" }],
+    })
+    expect(parseSearchQuery("in:patch SEARCH_WORKER_TIMEOUT_MS fallback")).toMatchObject({
+      term: "SEARCH_WORKER_TIMEOUT_MS fallback",
+      kind: "patch",
+      explicitScope: true,
+      clauses: [{ term: "SEARCH_WORKER_TIMEOUT_MS fallback", kind: "patch" }],
+    })
+  })
+
+  test("keeps quoted text inside a token", () => {
+    expect(parseSearchQuery('patch:"SearchResponse kind" user:"auth timeout"')).toMatchObject({
+      term: "SearchResponse kind auth timeout",
+      explicitScope: true,
+      clauses: [
+        { term: "SearchResponse kind", kind: "patch" },
+        { term: "auth timeout", kind: "user" },
+      ],
+    })
+  })
+
+  test("supports explicit OR separators", () => {
+    expect(parseSearchQuery("timeout OR patch:SearchResponse")).toMatchObject({
+      term: "timeout SearchResponse",
+      explicitScope: true,
+      clauses: [
+        { term: "timeout" },
+        { term: "SearchResponse", kind: "patch" },
+      ],
+    })
+  })
+
   test("treats unknown prefixes as plain text", () => {
     expect(parseSearchQuery("url:https://example.com")).toMatchObject({ term: "url:https://example.com", explicitScope: false })
   })
@@ -36,6 +85,7 @@ describe("parseSearchQuery", () => {
     expect(searchQueryLabel("text:patch:SearchResponse")).toBe("match: patch:SearchResponse")
     expect(searchQueryLabel("\\patch:SearchResponse")).toBe("match: patch:SearchResponse")
     expect(searchQueryLabel("tool:apply_patch SearchResponse")).toBe("match in tool:apply_patch: SearchResponse")
+    expect(searchQueryLabel("timeout patch:SearchResponse")).toBe("match any: timeout | patch: SearchResponse")
     expect(searchQueryLabel("SearchResponse")).toBe("match: SearchResponse")
   })
 })
@@ -69,6 +119,11 @@ describe("searchQueryHint", () => {
     expect(searchQueryHint("patch:SearchResponse")).toBe("Scoped search overrides the owner toggle.")
     expect(searchQueryHint("in:patch SearchResponse")).toBe("Scoped search overrides the owner toggle.")
     expect(searchQueryHint("tool:apply_patch SearchResponse")).toBe("Scoped search overrides the owner toggle.")
+  })
+
+  test("explains OR semantics for mixed clauses", () => {
+    expect(searchQueryHint("timeout patch:SearchResponse")).toBe("Mixed scopes use OR; scoped clauses override the owner toggle.")
+    expect(searchQueryHint("timeout OR retry")).toBe("Multiple clauses use OR.")
   })
 
   test("explains plain searches for scope-like text", () => {

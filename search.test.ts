@@ -328,6 +328,9 @@ describe("session search helpers", () => {
       expect(searchSessionMessages("tool:apply_patch scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)).toEqual(["prt_patch"])
       expect(searchSessionMessages("tool:edit scopeNeedle", { dbPath, directory: dir, limit: 10 })).toEqual([])
       expect(searchSessionMessages("user:scopeNeedle", { dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id)).toEqual(["prt_user"])
+      expect(searchSessionMessages("user:scopeNeedle patch:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id).sort()).toEqual(["prt_patch", "prt_user"])
+      expect(searchSessionMessages("scopeNeedle patch:scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id).sort()).toEqual(["prt_assistant", "prt_patch", "prt_user"])
+      expect(searchSessionMessages("user:scopeNeedle patch:scopeNeedle", { dbPath, directory: dir, limit: 10, role: "assistant" }).map((item) => item.id).sort()).toEqual(["prt_patch", "prt_user"])
 
       const patchResult = searchSessionMessages("patch:scopeNeedle", { dbPath, directory: dir, limit: 10 })[0]
       expect(patchResult?.match).toBe("scopeNeedle")

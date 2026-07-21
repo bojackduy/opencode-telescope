@@ -128,6 +128,7 @@ export type Row = {
   tool?: string | null
   time_created: number
   text: string
+  matchTerm?: string
 }
 
 export type IndexSourceRow = Omit<Row, "text"> & {
