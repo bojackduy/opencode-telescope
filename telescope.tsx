@@ -131,6 +131,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
     id: number
+    generation: number
+    itemID?: string
     previousContentHeight: number
     previousScrollTop: number
     requestedAmount: number
@@ -138,6 +140,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     visibleLoad: boolean
   }
   let previewBeforeLoadID = 0
+  let previewGeneration = 0
   let previewBeforeTimer: ReturnType<typeof setTimeout> | undefined
   let previewAfterTimer: ReturnType<typeof setTimeout> | undefined
   let pendingPreviewBefore: PendingPreviewBefore | undefined
@@ -145,7 +148,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewBeforeAdjusting = false
   let pendingCoalescedExplicit: { requestedAmount: number } | undefined
   let pendingPreviewAnchorCorrection: { anchorPartID: string; visualOffset: number; createdAt: number; expiresAt: number } | undefined
-  let pendingPreviewTarget: { itemID: string; targetID: string; attempts: number; alignedAttempts: number; createdAt: number } | undefined
+  let pendingPreviewTarget: { itemID: string; targetID: string; generation: number; attempts: number; alignedAttempts: number; createdAt: number } | undefined
   let previewTargetTimer: ReturnType<typeof setTimeout> | undefined
   const previewMeasuredHeights = new Map<string, number>()
   const cancelPreviewTargetAlignment = () => {
@@ -167,6 +170,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setPrefetchingPreviewBefore(false)
     setPrefetchingPreviewAfter(false)
     setLoadingPreviewMore(false)
+  }
+  const nextPreviewGeneration = (reason: string, itemID?: string) => {
+    previewGeneration++
+    debug.log("preview:generation", { generation: previewGeneration, reason, itemID, scrollTop: previewScroll?.scrollTop })
+    return previewGeneration
+  }
+  const isCurrentPreviewGeneration = (generation: number, itemID: string | undefined, source: string) => {
+    const selectedID = selectedResult()?.id
+    const current = generation === previewGeneration && (!itemID || selectedID === itemID)
+    if (!current) {
+      debug.log("preview:stale-callback", { source, generation, currentGeneration: previewGeneration, itemID, selectedID })
+    }
+    return current
   }
   const clearSearchWatchdog = () => {
     if (searchWatchdogTimer) clearTimeout(searchWatchdogTimer)
@@ -739,6 +755,13 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
   }
 
+  const schedulePreviewUpdateWindow = (source: string, generation = previewGeneration, itemID = selectedResult()?.id) => {
+    setTimeout(() => {
+      if (!isCurrentPreviewGeneration(generation, itemID, source)) return
+      updatePreviewWindow()
+    }, 1)
+  }
+
   const previewWindowParts = createMemo(() => {
     const { start, end } = previewWindow()
     return previewParts().slice(start, end)
@@ -823,24 +846,35 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         }
       }
       setPreviewHeightVersion((value) => value + 1)
-      setTimeout(updatePreviewWindow, 1)
+      schedulePreviewUpdateWindow("preview:measure:update-window")
     }
   }
 
   createEffect(() => {
     previewParts()
     previewHeightVersion()
-    const timer = setTimeout(updatePreviewWindow, 1)
+    const generation = previewGeneration
+    const itemID = selectedResult()?.id
+    const timer = setTimeout(() => {
+      if (!isCurrentPreviewGeneration(generation, itemID, "preview:effect:update-window")) return
+      updatePreviewWindow()
+    }, 1)
     onCleanup(() => clearTimeout(timer))
   })
 
   createEffect(() => {
     previewWindowParts()
-    const timer = setTimeout(measurePreviewWindow, 1)
+    const generation = previewGeneration
+    const itemID = selectedResult()?.id
+    const timer = setTimeout(() => {
+      if (!isCurrentPreviewGeneration(generation, itemID, "preview:effect:measure")) return
+      measurePreviewWindow()
+    }, 1)
     onCleanup(() => clearTimeout(timer))
   })
 
   const loadPreviewBefore = (pending: PendingPreviewBefore) => {
+    if (!isCurrentPreviewGeneration(pending.generation, pending.itemID, "preview:load-before:start")) return
     const item = selectedResult()
     const first = previewParts()[0]
     if (!item || !first || loadingPreviewMore() || prefetchingPreviewBefore()) {
@@ -922,6 +956,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
         previewBeforeAdjusting = true
         setTimeout(() => {
+          if (!isCurrentPreviewGeneration(pending.generation, pending.itemID, "preview:load-before:drift-correct")) {
+            previewBeforeAdjusting = false
+            return
+          }
           const newLayout = previewVirtualLayout()
           const anchorNew = newLayout.find(e => e.part.id === anchorPartID)
           const actualAnchorTop = anchorNew?.top ?? anchorPredictedTop
@@ -940,9 +978,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
               correctedScrollTop,
               window: correctedWindow,
             })
-          } else {
-            updatePreviewWindow()
-          }
+          } else updatePreviewWindow()
 
           previewBeforeAdjusting = false
 
@@ -977,7 +1013,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }
   }
 
-  const loadPreviewAfter = (visibleLoad = false) => {
+  const loadPreviewAfter = (visibleLoad = false, generation = previewGeneration, itemID = selectedResult()?.id) => {
+    if (!isCurrentPreviewGeneration(generation, itemID, "preview:load-after:start")) return
     const item = selectedResult()
     const last = previewParts().at(-1)
     if (!item || !last || loadingPreviewMore() || prefetchingPreviewAfter()) {
@@ -1008,7 +1045,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       })
       if (page.parts.length > 0) {
         setPreviewParts((prev) => [...prev, ...page.parts])
-        setTimeout(updatePreviewWindow, 1)
+        schedulePreviewUpdateWindow("preview:load-after:update-window", generation, itemID)
       }
       setHasMorePreviewAfter(page.hasMoreAfter)
     } catch (err) {
@@ -1031,6 +1068,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const previousScrollTop = opts.previousScrollTop ?? previewScroll?.scrollTop ?? 0
     const requestedAmount = opts.requestedAmount ?? 0
     const visibleLoad = opts.visibleLoad ?? false
+    const generation = previewGeneration
+    const itemID = selectedResult()?.id
     const source = opts.intent === "explicit-scroll" ? "key" : "edge"
     if (!hasMorePreviewBefore() || loadingPreviewMore() || prefetchingPreviewBefore()) {
       debug.log("preview:before:schedule-skip", {
@@ -1099,7 +1138,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       }
       return
     }
-    pendingPreviewBefore = { id, previousContentHeight, previousScrollTop, requestedAmount, intent: opts.intent, visibleLoad }
+    pendingPreviewBefore = { id, generation, itemID, previousContentHeight, previousScrollTop, requestedAmount, intent: opts.intent, visibleLoad }
     debug.log("preview:before:schedule", {
       loadID: id,
       source,
@@ -1116,11 +1155,13 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       const pending = pendingPreviewBefore
       previewBeforeTimer = undefined
       pendingPreviewBefore = undefined
-      if (pending) loadPreviewBefore(pending)
+      if (pending && isCurrentPreviewGeneration(pending.generation, pending.itemID, "preview:before:timer")) loadPreviewBefore(pending)
     }, 1)
   }
 
   const schedulePreviewAfter = (visibleLoad = false) => {
+    const generation = previewGeneration
+    const itemID = selectedResult()?.id
     if (!hasMorePreviewAfter() || loadingPreviewMore() || prefetchingPreviewAfter()) {
       debug.log("preview:prefetch-after:skip", {
         reason: !hasMorePreviewAfter() ? "no-more-after" : loadingPreviewMore() ? "loading-preview-more" : "prefetching-after",
@@ -1139,19 +1180,26 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       const pendingVisibleLoad = pendingPreviewAfterVisible
       previewAfterTimer = undefined
       pendingPreviewAfterVisible = false
-      loadPreviewAfter(pendingVisibleLoad)
+      if (!isCurrentPreviewGeneration(generation, itemID, "preview:after:timer")) return
+      loadPreviewAfter(pendingVisibleLoad, generation, itemID)
     }, 1)
   }
 
   const scrollPreviewToEstimatedWindow = (item: SearchResult, reason: string) => {
     const scroll = previewScroll
-    if (!scroll) return
+    if (!scroll) {
+      debug.log("preview:target-scroll:estimated-skip", { item: item.id, reason, generation: previewGeneration, reasonCode: "no-scroll" })
+      return
+    }
     const row = previewVirtualLayout().find((entry) => entry.part.id === item.id)
-    if (!row) return
+    if (!row) {
+      debug.log("preview:target-scroll:estimated-skip", { item: item.id, reason, generation: previewGeneration, reasonCode: "target-not-in-layout", parts: previewParts().length })
+      return
+    }
 
     const top = Math.max(0, row.top - Math.max(1, Math.floor(scroll.height / 3)))
     const nextWindow = previewWindowForLayout(previewVirtualLayout(), top, scroll.height)
-    debug.log("preview:target-scroll:estimated", { item: item.id, reason, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: nextWindow })
+    debug.log("preview:target-scroll:estimated", { item: item.id, reason, generation: previewGeneration, targetTop: row.top, scrollTop: scroll.scrollTop, nextScrollTop: top, window: nextWindow })
     setPreviewWindow(nextWindow)
     scroll.scrollTo(top)
     updatePreviewWindow()
@@ -1161,12 +1209,20 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     const target = pendingPreviewTarget
     const item = selectedResult()
     const scroll = previewScroll
-    if (!target || !item || item.id !== target.itemID || !scroll) {
+    if (!target || !item || item.id !== target.itemID || target.generation !== previewGeneration || !scroll) {
+      debug.log("preview:target-scroll:cancel", {
+        reason: !target ? "no-target" : !item ? "no-item" : item.id !== target.itemID ? "item-changed" : target.generation !== previewGeneration ? "generation-changed" : "no-scroll",
+        targetID: target?.targetID,
+        targetItemID: target?.itemID,
+        selectedItemID: item?.id,
+        generation: target?.generation,
+        currentGeneration: previewGeneration,
+      })
       cancelPreviewTargetAlignment()
       return
     }
     if (lastPreviewScrollKeyMs > target.createdAt) {
-      debug.log("preview:target-scroll:cancel", { reason: "manual-scroll", targetID: target.targetID })
+      debug.log("preview:target-scroll:cancel", { reason: "manual-scroll", targetID: target.targetID, itemID: target.itemID, generation: target.generation, lastPreviewScrollKeyMs, createdAt: target.createdAt })
       cancelPreviewTargetAlignment()
       return
     }
@@ -1176,6 +1232,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (aligned) {
       target.alignedAttempts++
       updatePreviewWindow()
+    } else {
+      debug.log("preview:target-scroll:retry-estimated", { targetID: target.targetID, itemID: target.itemID, generation: target.generation, attempts: target.attempts })
+      scrollPreviewToEstimatedWindow(item, "target-missing")
     }
 
     if (target.alignedAttempts >= 4 || (!aligned && target.attempts >= 12)) {
@@ -1188,18 +1247,22 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }, aligned ? 25 : 16)
   }
 
-  const queuePreviewTargetAlignment = (item: SearchResult, reason: string) => {
+  const queuePreviewTargetAlignment = (item: SearchResult, reason: string, generation = previewGeneration) => {
+    if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-queue")) return
     cancelPreviewTargetAlignment()
     pendingPreviewTarget = {
       itemID: item.id,
       targetID: previewPartTargetID(item),
+      generation,
       attempts: 0,
       alignedAttempts: 0,
       createdAt: Date.now(),
     }
+    debug.log("preview:target-scroll:queue", { item: item.id, targetID: previewPartTargetID(item), reason, generation, scrollTop: previewScroll?.scrollTop })
     scrollPreviewToEstimatedWindow(item, reason)
     previewTargetTimer = setTimeout(() => {
       previewTargetTimer = undefined
+      if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-timer")) return
       runPreviewTargetAlignment()
     }, 1)
   }
@@ -1208,21 +1271,28 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   createEffect(() => {
     const item = selectedResult()
     if (!item) {
+      if (lastPreviewItemId) nextPreviewGeneration("no-item", lastPreviewItemId)
+      lastPreviewItemId = ""
       cancelPreviewPrefetch()
       setPreviewParts([])
       previewMeasuredHeights.clear()
       setPreviewHeightVersion((value) => value + 1)
       setPreviewWindow({ start: 0, end: 0 })
+      previewScroll?.scrollTo(0)
       setHasMorePreviewBefore(false)
       setHasMorePreviewAfter(false)
       return
     }
     if (item.id === lastPreviewItemId) return
     lastPreviewItemId = item.id
+    const generation = nextPreviewGeneration("selected-item", item.id)
     cancelPreviewPrefetch()
     previewMeasuredHeights.clear()
     setPreviewHeightVersion((value) => value + 1)
     setPreviewWindow({ start: 0, end: 0 })
+    const previousScrollTop = previewScroll?.scrollTop ?? 0
+    previewScroll?.scrollTo(0)
+    debug.log("preview:reset-scroll", { item: item.id, generation, previousScrollTop, nextScrollTop: previewScroll?.scrollTop ?? 0 })
     debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
     debug.time("preview:load")
@@ -1240,7 +1310,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       setPreviewParts(page.parts)
       setHasMorePreviewBefore(page.hasMoreBefore)
       setHasMorePreviewAfter(page.hasMoreAfter)
-      setTimeout(() => queuePreviewTargetAlignment(item, "new-item"), 1)
+      setTimeout(() => {
+        if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-initial-timer")) return
+        queuePreviewTargetAlignment(item, "new-item", generation)
+      }, 1)
     } catch {}
     debug.timeEnd("nav:total")
     debug.timeEnd("preview:load")
