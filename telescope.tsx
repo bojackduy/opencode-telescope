@@ -28,7 +28,7 @@ import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
-import { findRenderableByID, jumpToRenderedTarget, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
   debug.log("component:render:start")
@@ -1293,10 +1293,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const open = () => {
     const item = selectedResult()
     if (!item) return
-    const targetID = messageTargetID(item)
+    const targetIDs = jumpTargetIDs(item, previewParts())
     props.api.ui.dialog.clear()
     props.api.route.navigate("session", { sessionID: item.sessionID })
-    jumpToRenderedTarget(props.api.renderer.root, targetID)
+    jumpToRenderedTarget(props.api.renderer.root, targetIDs)
   }
 
   const scrollPreview = (direction: 1 | -1, evt: ParsedKey) => {

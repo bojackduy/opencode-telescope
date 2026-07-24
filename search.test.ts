@@ -26,6 +26,7 @@ import {
   type SearchResult,
 } from "./search"
 import { setMeta } from "./search/schema.ts"
+import { buildVectorSearchPlan } from "./search/vector.ts"
 
 describe("session search helpers", () => {
   test("extracts user message text", () => {
@@ -724,6 +725,26 @@ describe("hybrid search helpers", () => {
   test("hybridBlend handles empty inputs gracefully", () => {
     expect(hybridBlend([], [], 0.45)).toEqual([])
     expect(hybridBlend([], [{ id: "prt_v1", message_id: "msg_1", session_id: "ses_1", session_title: "T", directory: "/d", role: "assistant", time_created: 1, text: "x" } as never], 0.45)).toHaveLength(1)
+  })
+})
+
+describe("vector search plan", () => {
+  test("applies directory role and bare-search kind filters", () => {
+    const plan = buildVectorSearchPlan(500, 25, { offset: 50, directory: "/repo", role: "user", kinds: ["user", "assistant"] })
+    expect(plan.where).toBe(" AND d.directory = ? AND d.role = ? AND d.kind IN (?, ?)")
+    expect(plan.params).toEqual(["/repo", "user", "user", "assistant"])
+    expect(plan.limit).toBe(25)
+    expect(plan.offset).toBe(50)
+    expect(plan.k).toBe(500)
+  })
+
+  test("uses an offset-aware candidate window without filters", () => {
+    const plan = buildVectorSearchPlan(1_000, 25, { offset: 50 })
+    expect(plan.where).toBe("")
+    expect(plan.params).toEqual([])
+    expect(plan.limit).toBe(25)
+    expect(plan.offset).toBe(50)
+    expect(plan.k).toBe(300)
   })
 })
 

@@ -276,28 +276,31 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   const db = getDb(dbPath)
   const limit = options?.limit ?? 80
+  const offset = options?.offset ?? 0
   const dir = options?.directory
   const role = options?.role
 
   const index = openSearchIndex(dbPath)
   const status = readKeywordIndexState(db, index, dbPath)
-  const keyword = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, limit, dir, options?.offset, role) : []
   const config = parseSemanticConfig()
+  const useHybridWindow = !parsed.explicitScope && !config.disableVector && isVectorReady(index)
+  const windowLimit = useHybridWindow ? Math.max(limit + offset, 200) : limit
+  const keyword = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, windowLimit, dir, useHybridWindow ? undefined : offset, role) : []
   let vectorState = getVectorState(index)
 
   let vector: Row[] = []
-  if (!parsed.explicitScope && !config.disableVector && isVectorReady(index)) {
-      try {
-        const indexPath = searchIndexPath(dbPath)
-        await withDeadline(vecExtensionLoading.get(indexPath) ?? Promise.resolve(), 250)
-        const embedTerm = expandQuery(parsed.term)
-        const embedding = await withDeadline(embedQuery(config, embedTerm), 1200)
-        vector = searchVector(index, embedding, limit)
-        debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== parsed.term ? embedTerm : undefined })
-      } catch (err) {
-        debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
-        vectorState = getVectorState(index)
-      }
+  if (useHybridWindow) {
+    try {
+      const indexPath = searchIndexPath(dbPath)
+      await withDeadline(vecExtensionLoading.get(indexPath) ?? Promise.resolve(), 250)
+      const embedTerm = expandQuery(parsed.term)
+      const embedding = await withDeadline(embedQuery(config, embedTerm), 1200)
+      vector = searchVector(index, embedding, windowLimit, { directory: dir, role, kinds: ["user", "assistant"] })
+      debug.log("query:vector:results", { count: vector.length, embedTerm: embedTerm !== parsed.term ? embedTerm : undefined })
+    } catch (err) {
+      debug.log("query:vector:error", err instanceof Error ? err.message : String(err))
+      vectorState = getVectorState(index)
+    }
   }
 
   const merged = keyword.length || vector.length
@@ -321,7 +324,8 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
     }
   }
 
-  return searchResponse(results.slice(0, limit), status.state, vectorState)
+  const start = useHybridWindow ? offset : 0
+  return searchResponse(results.slice(start, start + limit), status.state, vectorState)
 }
 
 function searchResponse(results: SearchResult[], keywordState: KeywordIndexState, vectorState?: VectorState): SearchResponse {

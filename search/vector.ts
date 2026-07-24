@@ -1,9 +1,16 @@
 import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
-import type { Row, ScoredRow, SemanticConfig } from "./types.ts"
+import type { Row, ScoredRow, SearchKind, SearchRole, SemanticConfig } from "./types.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { setMeta, getMeta } from "./schema.ts"
 import { debug } from "../ui/debug.ts"
+
+export type VectorSearchOptions = {
+  offset?: number
+  directory?: string
+  role?: SearchRole
+  kinds?: SearchKind[]
+}
 
 export function hybridBlend(keyword: Row[], vector: Row[], alpha: number): ScoredRow[] {
   const merged = new Map<string, ScoredRow>()
@@ -54,18 +61,59 @@ export function hybridBlend(keyword: Row[], vector: Row[], alpha: number): Score
   return normalized.sort((a, b) => b.score - a.score)
 }
 
-export function searchVector(index: Database, embedding: Float32Array, limit: number): Row[] {
+export function searchVector(index: Database, embedding: Float32Array, limit: number, options: VectorSearchOptions = {}): Row[] {
   const count = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_vec").get()?.count ?? 0
   if (!count) return []
-  const k = Math.min(count, Math.max(limit * 4, 200))
-  return index.query<Row, [Float32Array, number]>(`
+  const plan = buildVectorSearchPlan(count, limit, options)
+  if (plan.limit <= 0 || plan.k <= 0) return []
+  const params: Array<Float32Array | string | number> = [embedding, plan.k, ...plan.params, plan.limit]
+  if (plan.offset) params.push(plan.offset)
+  const offsetClause = plan.offset ? "OFFSET ?" : ""
+  return index.query<Row, Array<Float32Array | string | number>>(`
     SELECT d.part_id AS id, d.message_id, d.session_id, d.session_title, d.directory, d.kind, d.role,
            d.part_type, d.tool, CAST(d.time_created AS INTEGER) AS time_created, d.text
     FROM document_vec v
     JOIN document d ON d.rowid = v.rowid
-    WHERE v.embedding MATCH vec_f32(?) AND k = ?
+    WHERE v.embedding MATCH vec_f32(?) AND k = ?${plan.where}
     ORDER BY v.distance
-  `).all(embedding, k)
+    LIMIT ? ${offsetClause}
+  `).all(...params as any[])
+}
+
+export function buildVectorSearchPlan(totalCount: number, limit: number, options: VectorSearchOptions = {}) {
+  const conditions: string[] = []
+  const params: Array<string | number> = []
+  const offset = Math.max(0, options.offset ?? 0)
+  const pageLimit = Math.max(0, limit)
+
+  if (options.directory) {
+    conditions.push("d.directory = ?")
+    params.push(options.directory)
+  }
+  if (options.role) {
+    conditions.push("d.role = ?")
+    params.push(options.role)
+  }
+  if (options.kinds?.length) {
+    if (options.kinds.length === 1) {
+      conditions.push("d.kind = ?")
+      params.push(options.kinds[0]!)
+    } else {
+      conditions.push(`d.kind IN (${options.kinds.map(() => "?").join(", ")})`)
+      params.push(...options.kinds)
+    }
+  }
+
+  const hasFilters = conditions.length > 0
+  const wanted = pageLimit + offset
+  const k = hasFilters ? totalCount : Math.min(totalCount, Math.max(wanted * 4, 200))
+  return {
+    where: conditions.length ? ` AND ${conditions.join(" AND ")}` : "",
+    params,
+    k,
+    limit: pageLimit,
+    offset,
+  }
 }
 
 export function isVectorReady(index: Database) {

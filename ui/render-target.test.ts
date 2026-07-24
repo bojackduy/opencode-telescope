@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { findRenderableByID, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
-import type { SearchResult } from "../search.ts"
+import { findRenderableByID, jumpTargetIDs, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
+import type { ConversationPreviewPart, SearchResult } from "../search.ts"
 
 describe("render-target utils", () => {
   test("messageTargetID returns correct IDs", () => {
@@ -19,6 +19,40 @@ describe("render-target utils", () => {
 
   test("previewPartTargetID returns wrapper target ID", () => {
     expect(previewPartTargetID({ id: "prt_1" } as SearchResult)).toBe("preview-part-prt_1")
+  })
+
+  test("jumpTargetIDs falls back from hidden reasoning to visible same-message parts", () => {
+    const item = { partType: "reasoning", role: "assistant", messageID: "msg_1", id: "prt_thought" } as SearchResult
+    const parts = [
+      previewPart("prt_user", "msg_0", "user", "text"),
+      previewPart("prt_thought", "msg_1", "assistant", "reasoning"),
+      previewPart("prt_text", "msg_1", "assistant", "text"),
+      previewPart("prt_next", "msg_2", "assistant", "text"),
+    ]
+
+    expect(jumpTargetIDs(item, parts)).toEqual([
+      "text-msg_1-prt_thought",
+      "text-msg_1-prt_text",
+      "msg_1",
+      "msg_0",
+      "text-msg_2-prt_next",
+    ])
+  })
+
+  test("jumpTargetIDs falls back from tool matches to visible message/session targets", () => {
+    const item = { partType: "tool", role: "assistant", messageID: "msg_1", id: "prt_tool" } as SearchResult
+    const parts = [
+      previewPart("prt_text", "msg_1", "assistant", "text"),
+      previewPart("prt_tool", "msg_1", "assistant", "tool"),
+      previewPart("prt_user", "msg_2", "user", "text"),
+    ]
+
+    expect(jumpTargetIDs(item, parts)).toEqual([
+      "tool-msg_1-prt_tool",
+      "text-msg_1-prt_text",
+      "msg_1",
+      "msg_2",
+    ])
   })
 
   test("previewScrollAmount returns minimum of 1", () => {
@@ -94,3 +128,16 @@ describe("render-target utils", () => {
     expect(scrollPreviewToTarget(scroll as never, "missing")).toBe(false)
   })
 })
+
+function previewPart(id: string, messageID: string, role: ConversationPreviewPart["role"], type: ConversationPreviewPart["type"]): ConversationPreviewPart {
+  return {
+    id,
+    messageID,
+    sessionID: "ses_1",
+    role,
+    type,
+    timeCreated: 1,
+    text: "text",
+    target: id.includes("thought") || id.includes("tool"),
+  }
+}

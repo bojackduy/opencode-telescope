@@ -1,5 +1,5 @@
 import type { ScrollBoxRenderable } from "@opentui/core"
-import type { SearchResult } from "../search.ts"
+import type { ConversationPreviewPart, SearchResult } from "../search.ts"
 import { debug } from "./debug.ts"
 
 export function previewScrollAmount(scroll: ScrollBoxRenderable | undefined) {
@@ -15,6 +15,25 @@ export function messageTargetID(item: SearchResult) {
 
 export function previewPartTargetID(item: SearchResult) {
   return `preview-part-${item.id}`
+}
+
+export function jumpTargetIDs(item: SearchResult, parts: ConversationPreviewPart[] = []) {
+  const ids: string[] = []
+  const add = (id: string | undefined) => {
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+
+  add(messageTargetID(item))
+
+  const targetIndex = parts.findIndex((part) => part.id === item.id)
+  const visibleParts = parts.filter(isVisibleJumpPart)
+  const sameMessage = sortByDistance(visibleParts.filter((part) => part.messageID === item.messageID), parts, targetIndex)
+  for (const part of sameMessage) add(partTargetID(part))
+
+  add(item.messageID)
+
+  for (const part of sortByDistance(visibleParts, parts, targetIndex)) add(partTargetID(part))
+  return ids
 }
 
 export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
@@ -52,16 +71,24 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
   return true
 }
 
-export function jumpToRenderedTarget(root: unknown, targetID: string) {
+export function jumpToRenderedTarget(root: unknown, targetID: string | string[]) {
+  const targetIDs = Array.isArray(targetID) ? targetID.filter(Boolean) : [targetID]
   let attempts = 0
   const tick = () => {
-    const hit = findRenderableTarget(root, targetID)
-    if (hit) {
-      hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
-      return
+    for (const candidate of targetIDs) {
+      const hit = findRenderableTarget(root, candidate)
+      if (hit) {
+        debug.log("jump:target", { targetID: candidate, candidates: targetIDs })
+        hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
+        return
+      }
     }
     attempts++
-    if (attempts < 40) setTimeout(tick, 50)
+    if (attempts < 40) {
+      setTimeout(tick, 50)
+    } else {
+      debug.log("jump:target-missing", { targetIDs })
+    }
   }
   setTimeout(tick, 50)
 }
@@ -100,6 +127,25 @@ function isRenderNode(value: unknown): value is RenderNode {
 
 function isScrollNode(value: RenderNode): value is ScrollNode {
   return "scrollBy" in value && typeof value.scrollBy === "function"
+}
+
+function isVisibleJumpPart(part: ConversationPreviewPart) {
+  return part.type !== "reasoning"
+}
+
+function partTargetID(part: ConversationPreviewPart) {
+  if (part.type === "tool") return `tool-${part.messageID}-${part.id}`
+  if (part.role === "assistant") return `text-${part.messageID}-${part.id}`
+  return part.messageID
+}
+
+function sortByDistance(parts: ConversationPreviewPart[], allParts: ConversationPreviewPart[], targetIndex: number) {
+  if (targetIndex < 0) return parts
+  return [...parts].sort((a, b) => {
+    const aIndex = allParts.findIndex((part) => part.id === a.id)
+    const bIndex = allParts.findIndex((part) => part.id === b.id)
+    return Math.abs(aIndex - targetIndex) - Math.abs(bIndex - targetIndex)
+  })
 }
 
 export function findRenderableByID(node: unknown, targetID: string): RenderNode | undefined {
