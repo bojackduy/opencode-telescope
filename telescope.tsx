@@ -13,11 +13,9 @@ import {
   parseSemanticConfig,
   performSearch,
   recentSessionMessages,
-  recentSessionMessagesWithStatus,
   resolveDatabasePath,
   searchQueryHint,
   searchSessionMessages,
-  searchSessionMessagesWithStatus,
   type ConversationPreviewPart,
   type KeywordIndexState,
   type SearchResult,
@@ -114,10 +112,12 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let searchRequestId = 0
   let fallbackSearchRequestId: number | undefined
   let searchWorker: Worker | undefined
+  let sourceSearchWorker: Worker | undefined
   let indexWorker: Worker | undefined
   let indexJobId = 0
   const activeIndexJobs = new Set<string>()
   const SEARCH_DEBOUNCE_MS = 200
+  const SOURCE_FALLBACK_DELAY_MS = 1_000
   const SEARCH_WORKER_TIMEOUT_MS = 3000
   type SearchRequest = {
     id: number
@@ -128,6 +128,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     limit: number
   }
   let pendingSearchRequest: SearchRequest | undefined
+  let sourceFallbackTimer: ReturnType<typeof setTimeout> | undefined
+  let sourceFallbackRequestId: number | undefined
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
     id: number
@@ -188,9 +190,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (searchWatchdogTimer) clearTimeout(searchWatchdogTimer)
     searchWatchdogTimer = undefined
   }
+  const cancelSourceFallback = () => {
+    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
+    sourceFallbackTimer = undefined
+    sourceFallbackRequestId = undefined
+    sourceSearchWorker?.terminate()
+    sourceSearchWorker = undefined
+  }
   const commitSearchBatch = (request: SearchRequest, batch: SearchResult[], source: string) => {
     if (request.id !== searchRequestId) return
     clearSearchWatchdog()
+    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
+    sourceFallbackTimer = undefined
+    sourceFallbackRequestId = undefined
     if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
     pendingSearchRequest = undefined
     debug.log("bootstrap:search:done", { rows: batch.length, limit: request.limit, mode: searchMode(), source })
@@ -209,6 +221,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const failSearch = (request: SearchRequest, error: string) => {
     if (request.id !== searchRequestId) return
     clearSearchWatchdog()
+    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
+    sourceFallbackTimer = undefined
+    sourceFallbackRequestId = undefined
     if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
     pendingSearchRequest = undefined
     debug.log("bootstrap:search:error", error)
@@ -223,33 +238,73 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoading(false)
     debug.timeEnd("query:search")
   }
-  const settleSearchAsIndexing = (request: SearchRequest, reason: string) => {
-    if (request.id !== searchRequestId) return
-    clearSearchWatchdog()
-    pendingSearchRequest = undefined
-    debug.log("bootstrap:search:indexing", { reason, query: request.q || "(all recent)", limit: request.limit })
-    setKeywordIndexState("indexing")
-    requestIndexRebuild(request.db, "stale")
-    setBusy(false)
-    setLoading(false)
-    debug.timeEnd("query:search")
-  }
-  const runSearchFallback = async (request: SearchRequest, reason: string) => {
+  const runSearchFallback = (request: SearchRequest, reason: string) => {
     if (request.id !== searchRequestId) return
     if (fallbackSearchRequestId === request.id) return
     fallbackSearchRequestId = request.id
     clearSearchWatchdog()
-    debug.log("bootstrap:search:fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
+    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
+    sourceFallbackTimer = undefined
+    sourceFallbackRequestId = request.id
+    searchWorker?.terminate()
+    searchWorker = undefined
+    setKeywordIndexState("indexing")
+    requestIndexRebuild(request.db, "stale")
+    debug.log("bootstrap:search:source-fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
+    if (!ensureSourceSearchWorker()) {
+      failSearch(request, "Could not start the temporary source search.")
+      return
+    }
+    sourceSearchWorker!.postMessage({
+      type: "source-search",
+      id: request.id,
+      query: request.q,
+      limit: request.limit,
+      directory: request.dir,
+      role: request.role,
+      dbPath: request.db,
+    })
+  }
+  const scheduleSourceFallback = (request: SearchRequest, reason: string) => {
+    if (sourceFallbackTimer || sourceFallbackRequestId === request.id) return
+    sourceFallbackTimer = setTimeout(() => {
+      sourceFallbackTimer = undefined
+      runSearchFallback(request, reason)
+    }, SOURCE_FALLBACK_DELAY_MS)
+  }
+  const ensureSourceSearchWorker = () => {
+    if (sourceSearchWorker) return true
     try {
-      const response = request.q
-        ? searchSessionMessagesWithStatus(request.q, { limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
-        : recentSessionMessagesWithStatus({ limit: request.limit, offset: 0, dbPath: request.db, directory: request.dir, role: request.role })
-      setKeywordIndexState(response.keywordState)
-      setVectorState(response.vectorState)
-      requestIndexRebuild(request.db, response.keywordState)
-      commitSearchBatch(request, response.results, `fallback:${reason}`)
+      sourceSearchWorker = new Worker(new URL("./source-search-worker.ts", import.meta.url))
+      sourceSearchWorker.onmessage = (event: MessageEvent) => {
+        const msg = event.data
+        if (msg.type === "source-result") {
+          if (msg.id !== searchRequestId || sourceFallbackRequestId !== msg.id) return
+          const request = pendingSearchRequest
+          if (!request || request.id !== msg.id) return
+          setKeywordIndexState(msg.keywordState ?? "indexing")
+          commitSearchBatch(request, msg.result, "source-fallback")
+          return
+        }
+        if (msg.type === "source-error") {
+          if (msg.id !== searchRequestId || sourceFallbackRequestId !== msg.id) return
+          const request = pendingSearchRequest
+          if (!request || request.id !== msg.id) return
+          failSearch(request, msg.error)
+        }
+      }
+      sourceSearchWorker.onerror = (err) => {
+        debug.log("source-worker:error", err.message)
+        const request = pendingSearchRequest
+        sourceSearchWorker?.terminate()
+        sourceSearchWorker = undefined
+        if (request && sourceFallbackRequestId === request.id) failSearch(request, `Temporary source search failed: ${err.message}`)
+      }
+      return true
     } catch (err) {
-      failSearch(request, err instanceof Error ? err.message : String(err))
+      debug.log("source-worker:create-error", err instanceof Error ? err.message : String(err))
+      sourceSearchWorker = undefined
+      return false
     }
   }
   const shouldRebuildIndex = (state: KeywordIndexState) => state === "missing" || state === "empty" || state === "stale" || state === "error"
@@ -315,6 +370,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           setKeywordIndexState(msg.keywordState ?? "ready")
           setVectorState(msg.vectorState)
           requestIndexRebuild(request.db, msg.keywordState ?? "ready")
+          if (msg.keywordState === "missing" || msg.keywordState === "empty" || msg.keywordState === "indexing") {
+            runSearchFallback(request, `sidecar:${msg.keywordState}`)
+            return
+          }
           commitSearchBatch(request, msg.result, "worker")
         }
         if (msg.type === "error") {
@@ -342,6 +401,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
     if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
     clearSearchWatchdog()
+    cancelSourceFallback()
     cancelPreviewPrefetch()
     searchWorker?.terminate()
     searchWorker = undefined
@@ -438,8 +498,13 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     debug.time("query:search")
     const id = ++searchRequestId
     fallbackSearchRequestId = undefined
+    cancelSourceFallback()
     const request: SearchRequest = { id, q, role, db, dir, limit }
     pendingSearchRequest = request
+    if (activeIndexJobs.has(db) || keywordIndexState() === "indexing") {
+      runSearchFallback(request, "indexing-active")
+      return
+    }
     if (!ensureSearchWorker()) {
       runSearchFallback(request, "worker-create-failed")
       return
@@ -452,11 +517,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     searchWatchdogTimer = setTimeout(() => {
       if (request.id !== searchRequestId) return
       debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
-      searchWorker?.terminate()
-      searchWorker = undefined
-      settleSearchAsIndexing(request, "worker-timeout")
+      runSearchFallback(request, "worker-timeout")
     }, SEARCH_WORKER_TIMEOUT_MS)
     ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
+    scheduleSourceFallback(request, "sidecar-slow")
     searchWorker!.postMessage(msg)
   }
 

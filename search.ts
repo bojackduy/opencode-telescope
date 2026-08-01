@@ -31,6 +31,7 @@ export type {
 export {
   searchSessionMessages,
   searchSessionMessagesWithStatus,
+  searchSourceFallbackWithStatus,
   recentSessionMessages,
   recentSessionMessagesWithStatus,
   loadConversationAround,

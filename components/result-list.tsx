@@ -66,7 +66,7 @@ export const EmptyState = (props: { query: string; owner: string; theme: TuiThem
 )
 
 function emptyMessage(query: string, owner: string, keywordIndexState?: KeywordIndexState) {
-  if (keywordIndexState === "indexing" || keywordIndexState === "missing" || keywordIndexState === "empty") return "Indexing conversations in background..."
+  if (keywordIndexState === "indexing" || keywordIndexState === "missing" || keywordIndexState === "empty") return "Searching recent conversations while the index builds..."
   if (keywordIndexState === "stale") return "Updating conversation index..."
   if (keywordIndexState === "error") return "Conversation index is unavailable. Try reopening Telescope."
   return query.trim() ? `No matching ${owner} conversation text.` : `No recent ${owner} conversation text found.`

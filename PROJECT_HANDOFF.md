@@ -17,7 +17,7 @@ Core principles:
 - Bare search should be low-noise and fast.
 - Bare search searches user prompts and assistant replies only.
 - Thoughts, patches, file names inside patches, and tool content are opt-in via explicit scopes.
-- Search should use Telescope's sidecar index and must not source-scan the OpenCode database on typed queries.
+- Search should use Telescope's sidecar index in normal operation. A bounded source-DB fallback is allowed only in its own worker while the sidecar is missing, indexing, or slow.
 - Semantic/vector search is optional and opt-in only.
 - Preview and jump behavior should be reliable even when OpenCode does not render every indexed part.
 
@@ -98,6 +98,9 @@ Important files:
 - `search-worker.ts`
   - Initial search/recent queries from worker.
 
+- `source-search-worker.ts`
+  - Bounded source-DB fallback worker used while the sidecar is unavailable or slow.
+
 - `index-worker.ts`
   - Background keyword sidecar rebuilds.
 
@@ -150,6 +153,25 @@ Tests:
 Remaining risk:
 
 - Vector index build/rebuild lifecycle still needs deeper work. See `Known Issues`.
+
+### Slow Or Missing Sidecar Fallback
+
+Implemented:
+
+- `searchSourceFallbackWithStatus()` searches a bounded recent source-DB window without opening the sidecar.
+- `source-search-worker.ts` keeps this work off the TUI thread and separate from a sidecar lock.
+- The picker starts fallback immediately when indexing is known, when sidecar status is missing/empty/indexing, or after a one-second sidecar-search delay.
+- The previous three-second search-worker timeout now degrades to source fallback instead of showing an empty indexing state.
+- Fallback honors directory, owner, and `user:`, `assistant:`, `thought:`, `patch:`, and `tool:` query semantics.
+- Fallback is intentionally partial: it searches at most 1,200 recent indexable parts, then active query refreshes through full FTS when indexing completes.
+
+Logs:
+
+```txt
+bootstrap:search:source-fallback
+query:source-fallback
+source-worker:error
+```
 
 ### Hidden Thought/Tool Jump Fallback
 

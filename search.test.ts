@@ -22,6 +22,7 @@ import {
   rowToVectorResult,
   searchSessionMessages,
   searchSessionMessagesWithStatus,
+  searchSourceFallbackWithStatus,
   searchIndexPath,
   type SearchResult,
 } from "./search"
@@ -206,6 +207,45 @@ describe("session search helpers", () => {
       const response = searchSessionMessagesWithStatus("pendingSearchNeedle", { dbPath, directory: dir, limit: 10 })
       expect(response.keywordState).toBe("empty")
       expect(response.results).toEqual([])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("source fallback returns bounded scoped results while sidecar indexing is pending", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-source-fallback-"))
+    const otherDir = path.join(dir, "other")
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Fallback", dir)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_2", "Other", otherDir)
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_user", "ses_1", JSON.stringify({ role: "user" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_assistant", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_other", "ses_2", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_user", "msg_user", "ses_1", 1, JSON.stringify({ type: "text", text: "fallbackNeedle from user" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_assistant", "msg_assistant", "ses_1", 2, JSON.stringify({ type: "text", text: "fallbackNeedle from assistant" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_thought", "msg_assistant", "ses_1", 3, JSON.stringify({ type: "reasoning", text: "fallbackNeedle from thought" }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_patch", "msg_assistant", "ses_1", 4, JSON.stringify({ type: "tool", tool: "apply_patch", state: { input: { patchText: "fallbackNeedle patch" } } }))
+      db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+        .run("prt_other", "msg_other", "ses_2", 5, JSON.stringify({ type: "text", text: "fallbackNeedle from other directory" }))
+
+      expect(searchSourceFallbackWithStatus("fallbackNeedle", { dbPath, directory: dir, limit: 10 })).toMatchObject({ keywordState: "indexing" })
+      expect(searchSourceFallbackWithStatus("fallbackNeedle", { dbPath, directory: dir, limit: 10 }).results.map((item) => item.id).sort()).toEqual(["prt_assistant", "prt_user"])
+      expect(searchSourceFallbackWithStatus("user:fallbackNeedle", { dbPath, directory: dir, limit: 10 }).results.map((item) => item.id)).toEqual(["prt_user"])
+      expect(searchSourceFallbackWithStatus("thought:fallbackNeedle", { dbPath, directory: dir, limit: 10 }).results.map((item) => item.id)).toEqual(["prt_thought"])
+      expect(searchSourceFallbackWithStatus("patch:fallbackNeedle", { dbPath, directory: dir, limit: 10 }).results.map((item) => item.id)).toEqual(["prt_patch"])
+      expect(searchSourceFallbackWithStatus("fallbackNeedle", { dbPath, directory: dir, role: "user", limit: 10 }).results.map((item) => item.id)).toEqual(["prt_user"])
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })

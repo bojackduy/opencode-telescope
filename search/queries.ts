@@ -49,6 +49,8 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
   return searchSessionMessagesWithStatus(query, options).results
 }
 
+const SOURCE_FALLBACK_CANDIDATE_LIMIT = 1_200
+
 export function searchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const parsed = parseSearchQuery(query)
   if (!parsed.term) return searchResponse([], "ready")
@@ -59,6 +61,94 @@ export function searchSessionMessagesWithStatus(query: string, options?: { limit
   const status = readKeywordIndexState(db, index, dbPath)
   const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
   return searchResponse(rows.flatMap((row) => rowToSearchResult(row, row.matchTerm ?? parsed.term) ?? []), status.state, getVectorState(index))
+}
+
+// This worker-only fallback keeps the picker useful while its sidecar is unavailable.
+// It intentionally scans a bounded recent window and never opens the sidecar database.
+export function searchSourceFallbackWithStatus(query: string, options?: { limit?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
+  const parsed = parseSearchQuery(query)
+  if (query.trim() && !parsed.term) return searchResponse([], "indexing")
+  if (options?.dbPath === ":memory:") return searchResponse([], "missing")
+
+  const dbPath = options?.dbPath ?? resolveDatabasePath()
+  const source = getDb(dbPath)
+  const limit = options?.limit ?? 80
+  const startedAt = performance.now()
+  const rows = querySourceFallbackRows(source, parsed, options?.directory, options?.role)
+  const results: SearchResult[] = []
+  const seen = new Set<string>()
+
+  for (const sourceRow of rows) {
+    for (const row of indexSourceRowToRows(sourceRow)) {
+      const result = sourceFallbackResult(row, parsed, options?.role)
+      if (result && !seen.has(result.id)) {
+        seen.add(result.id)
+        results.push(result)
+      }
+      if (results.length >= limit) break
+    }
+    if (results.length >= limit) break
+  }
+
+  debug.log("query:source-fallback", {
+    query: query || "(recent)",
+    candidates: rows.length,
+    results: results.length,
+    limit,
+    capped: rows.length === SOURCE_FALLBACK_CANDIDATE_LIMIT,
+    ms: Number((performance.now() - startedAt).toFixed(2)),
+  })
+  return searchResponse(results, "indexing")
+}
+
+function querySourceFallbackRows(source: Database, query: ParsedSearchQuery, directory?: string, role?: SearchRole) {
+  const conditions = [
+    `(
+      json_extract(p.data, '$.type') = 'text'
+      OR json_extract(p.data, '$.type') = 'reasoning'
+      OR (
+        json_extract(p.data, '$.type') = 'tool'
+        AND json_extract(p.data, '$.tool') IN ('apply_patch', 'edit', 'write')
+      )
+    )`,
+    "json_extract(m.data, '$.role') IN ('user', 'assistant')",
+  ]
+  const params: (string | number)[] = []
+
+  if (directory) {
+    conditions.push("s.directory = ?")
+    params.push(directory)
+  }
+  if (role && !query.explicitScope) {
+    conditions.push("json_extract(m.data, '$.role') = ?")
+    params.push(role)
+  }
+  params.push(SOURCE_FALLBACK_CANDIDATE_LIMIT)
+
+  return source.query<IndexSourceRow, (string | number)[]>(`
+    SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
+           json_extract(m.data, '$.role') AS role,
+           json_extract(p.data, '$.type') AS part_type,
+           json_extract(p.data, '$.tool') AS tool,
+           p.time_created, p.data
+    FROM part p
+    JOIN message m ON m.id = p.message_id
+    JOIN session s ON s.id = p.session_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY p.time_created DESC, p.id DESC
+    LIMIT ?
+  `).all(...params as any[])
+}
+
+function sourceFallbackResult(row: Row, query: ParsedSearchQuery, role?: SearchRole) {
+  for (const clause of query.clauses) {
+    if (clause.kind && row.kind !== clause.kind) continue
+    if (clause.tool && row.tool !== clause.tool) continue
+    if (!clause.kind && !clause.tool && row.kind !== "user" && row.kind !== "assistant") continue
+    if (role && !query.explicitScope && row.role !== role) continue
+    const result = rowToSearchResult(row, clause.term)
+    if (result) return result
+  }
 }
 
 export function recentSessionMessages(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }) {
