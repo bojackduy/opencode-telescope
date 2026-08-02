@@ -50,6 +50,10 @@ export function searchSessionMessages(query: string, options?: { limit?: number;
 }
 
 const SOURCE_FALLBACK_CANDIDATE_LIMIT = 1_200
+const SOURCE_FALLBACK_SESSION_LIMIT = 32
+const SOURCE_FALLBACK_MESSAGES_PER_SESSION = 24
+const SOURCE_FALLBACK_PARTS_PER_MESSAGE = 16
+const SOURCE_FALLBACK_TIME_BUDGET_MS = 750
 
 export function searchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const parsed = parseSearchQuery(query)
@@ -74,11 +78,11 @@ export function searchSourceFallbackWithStatus(query: string, options?: { limit?
   const source = getDb(dbPath)
   const limit = options?.limit ?? 80
   const startedAt = performance.now()
-  const rows = querySourceFallbackRows(source, parsed, options?.directory, options?.role)
+  const scan = querySourceFallbackRows(source, parsed, options?.directory, options?.role, startedAt)
   const results: SearchResult[] = []
   const seen = new Set<string>()
 
-  for (const sourceRow of rows) {
+  for (const sourceRow of scan.rows) {
     for (const row of indexSourceRowToRows(sourceRow)) {
       const result = sourceFallbackResult(row, parsed, options?.role)
       if (result && !seen.has(result.id)) {
@@ -92,52 +96,119 @@ export function searchSourceFallbackWithStatus(query: string, options?: { limit?
 
   debug.log("query:source-fallback", {
     query: query || "(recent)",
-    candidates: rows.length,
+    candidates: scan.rows.length,
+    sessions: scan.sessions,
+    messages: scan.messages,
     results: results.length,
     limit,
-    capped: rows.length === SOURCE_FALLBACK_CANDIDATE_LIMIT,
+    stopReason: scan.stopReason,
     ms: Number((performance.now() - startedAt).toFixed(2)),
   })
   return searchResponse(results, "indexing")
 }
 
-function querySourceFallbackRows(source: Database, query: ParsedSearchQuery, directory?: string, role?: SearchRole) {
-  const conditions = [
-    `(
-      json_extract(p.data, '$.type') = 'text'
-      OR json_extract(p.data, '$.type') = 'reasoning'
-      OR (
-        json_extract(p.data, '$.type') = 'tool'
-        AND json_extract(p.data, '$.tool') IN ('apply_patch', 'edit', 'write')
-      )
-    )`,
-    "json_extract(m.data, '$.role') IN ('user', 'assistant')",
-  ]
-  const params: (string | number)[] = []
-
-  if (directory) {
-    conditions.push("s.directory = ?")
-    params.push(directory)
-  }
-  if (role && !query.explicitScope) {
-    conditions.push("json_extract(m.data, '$.role') = ?")
-    params.push(role)
-  }
-  params.push(SOURCE_FALLBACK_CANDIDATE_LIMIT)
-
-  return source.query<IndexSourceRow, (string | number)[]>(`
-    SELECT p.id, p.message_id, p.session_id, s.title AS session_title, s.directory,
-           json_extract(m.data, '$.role') AS role,
-           json_extract(p.data, '$.type') AS part_type,
-           json_extract(p.data, '$.tool') AS tool,
-           p.time_created, p.data
-    FROM part p
-    JOIN message m ON m.id = p.message_id
-    JOIN session s ON s.id = p.session_id
-    WHERE ${conditions.join(" AND ")}
-    ORDER BY p.time_created DESC, p.id DESC
+function querySourceFallbackRows(source: Database, query: ParsedSearchQuery, directory: string | undefined, role: SearchRole | undefined, startedAt: number) {
+  const rows: IndexSourceRow[] = []
+  const sessionConditions = directory ? "WHERE directory = ?" : ""
+  const sessionParams = directory ? [directory, SOURCE_FALLBACK_SESSION_LIMIT] : [SOURCE_FALLBACK_SESSION_LIMIT]
+  const sessions = source.query<{ id: string; title: string; directory: string }, (string | number)[]>(`
+    SELECT id, title, directory
+    FROM session
+    ${sessionConditions}
+    ORDER BY rowid DESC
     LIMIT ?
-  `).all(...params as any[])
+  `).all(...sessionParams as any[])
+
+  const messageHasTime = tableHasColumn(source, "message", "time_created")
+  const partHasTime = tableHasColumn(source, "part", "time_created")
+  const messageOrder = messageHasTime ? "time_created DESC, id DESC" : "rowid DESC"
+  const partTime = partHasTime ? "time_created" : "0 AS time_created"
+  let messageCount = 0
+  let stopReason = "sessions-exhausted"
+
+  for (const session of sessions) {
+    if (sourceFallbackBudgetExpired(startedAt)) {
+      stopReason = "time-budget"
+      break
+    }
+    const messages = source.query<{ id: string; session_id: string; data: string }, [string, number]>(`
+      SELECT id, session_id, data
+      FROM message
+      WHERE session_id = ?
+      ORDER BY ${messageOrder}
+      LIMIT ?
+    `).all(session.id, SOURCE_FALLBACK_MESSAGES_PER_SESSION)
+
+    for (const message of messages) {
+      messageCount++
+      if (sourceFallbackBudgetExpired(startedAt)) {
+        stopReason = "time-budget"
+        break
+      }
+      const messageRole = sourceMessageRole(message.data)
+      if (!messageRole || (role && !query.explicitScope && messageRole !== role)) continue
+
+      const parts = source.query<{ id: string; message_id: string; session_id: string; time_created: number; data: string }, [string, number]>(`
+        SELECT id, message_id, session_id, ${partTime}, data
+        FROM part
+        WHERE message_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `).all(message.id, SOURCE_FALLBACK_PARTS_PER_MESSAGE)
+
+      for (const part of parts) {
+        const metadata = sourcePartMetadata(part.data)
+        if (!metadata) continue
+        rows.push({
+          id: part.id,
+          message_id: part.message_id,
+          session_id: part.session_id,
+          session_title: session.title,
+          directory: session.directory,
+          role: messageRole,
+          part_type: metadata.partType,
+          tool: metadata.tool,
+          time_created: part.time_created,
+          data: part.data,
+        })
+        if (rows.length >= SOURCE_FALLBACK_CANDIDATE_LIMIT) {
+          stopReason = "candidate-budget"
+          break
+        }
+      }
+      if (rows.length >= SOURCE_FALLBACK_CANDIDATE_LIMIT) break
+    }
+    if (stopReason === "time-budget" || rows.length >= SOURCE_FALLBACK_CANDIDATE_LIMIT) break
+  }
+
+  return { rows, sessions: sessions.length, messages: messageCount, stopReason }
+}
+
+function sourceFallbackBudgetExpired(startedAt: number) {
+  return performance.now() - startedAt >= SOURCE_FALLBACK_TIME_BUDGET_MS
+}
+
+function tableHasColumn(db: Database, table: "message" | "part", column: string) {
+  return db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((item) => item.name === column)
+}
+
+function sourceMessageRole(data: string): SearchRole | undefined {
+  try {
+    const role = (JSON.parse(data) as { role?: unknown }).role
+    return role === "user" || role === "assistant" ? role : undefined
+  } catch {
+    return
+  }
+}
+
+function sourcePartMetadata(data: string): { partType: SearchResult["partType"]; tool?: string } | undefined {
+  try {
+    const value = JSON.parse(data) as { type?: unknown; tool?: unknown }
+    if (value.type === "text" || value.type === "reasoning") return { partType: value.type }
+    if (value.type === "tool" && typeof value.tool === "string" && ["apply_patch", "edit", "write"].includes(value.tool)) {
+      return { partType: "tool", tool: value.tool }
+    }
+  } catch {}
 }
 
 function sourceFallbackResult(row: Row, query: ParsedSearchQuery, role?: SearchRole) {

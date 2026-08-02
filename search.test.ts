@@ -252,6 +252,38 @@ describe("session search helpers", () => {
     }
   })
 
+  test("source fallback limits work to a recent session window", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-source-budget-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT, time_updated INTEGER NOT NULL);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER NOT NULL, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
+      `)
+      for (let index = 0; index < 40; index++) {
+        const sessionID = `ses_${String(index).padStart(2, "0")}`
+        const messageID = `msg_${String(index).padStart(2, "0")}`
+        const partID = `prt_${String(index).padStart(2, "0")}`
+        db.query("INSERT INTO session(id, title, directory, time_updated) VALUES (?, ?, ?, ?)").run(sessionID, `Session ${index}`, dir, index)
+        db.query("INSERT INTO message(id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run(messageID, sessionID, index, JSON.stringify({ role: "assistant" }))
+        db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
+          .run(partID, messageID, sessionID, index, JSON.stringify({ type: "text", text: "budgetNeedle" }))
+      }
+
+      const ids = searchSourceFallbackWithStatus("budgetNeedle", { dbPath, directory: dir, limit: 100 }).results.map((item) => item.id)
+      expect(ids).toHaveLength(32)
+      expect(ids).toContain("prt_39")
+      expect(ids).not.toContain("prt_07")
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("typed search returns stale sidecar rows without scanning source", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-search-stale-"))
     const dbPath = path.join(dir, "opencode.db")

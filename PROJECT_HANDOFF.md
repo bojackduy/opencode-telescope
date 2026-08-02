@@ -163,7 +163,11 @@ Implemented:
 - The picker starts fallback immediately when indexing is known, when sidecar status is missing/empty/indexing, or after a one-second sidecar-search delay.
 - The previous three-second search-worker timeout now degrades to source fallback instead of showing an empty indexing state.
 - Fallback honors directory, owner, and `user:`, `assistant:`, `thought:`, `patch:`, and `tool:` query semantics.
-- Fallback is intentionally partial: it searches at most 1,200 recent indexable parts, then active query refreshes through full FTS when indexing completes.
+- Fallback uses staged reads over recent sessions, indexed messages, and indexed parts instead of a full-table JSON/sort query.
+- Fallback is intentionally partial: at most 32 sessions, 24 messages per session, 16 parts per message, 1,200 indexable parts, or 750ms of worker processing.
+- A new full index rebuild starts only after fallback returns, avoiding immediate CPU/disk competition on weak machines.
+- Source fallback has a 2.5-second safety timeout; timeout/error remains nonfatal while background indexing continues.
+- The active query refreshes through full FTS when indexing completes.
 
 Logs:
 
