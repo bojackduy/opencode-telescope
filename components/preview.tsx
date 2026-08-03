@@ -360,14 +360,15 @@ const HighlightedConversationText = (props: { part: ConversationPreviewPart; ite
   )
 }
 
-const ConversationFallback = (props: { item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => (
-  <Show
-    when={props.item.role === "assistant"}
-    fallback={<PreviewUserPart part={searchResultPreviewPart(props.item)} item={props.item} theme={props.theme} />}
-  >
-    <PreviewAssistantPart part={searchResultPreviewPart(props.item)} item={props.item} syntax={props.syntax} theme={props.theme} />
-  </Show>
-)
+const ConversationFallback = (props: { item: SearchResult; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
+  const part = () => searchResultPreviewPart(props.item)
+  return (
+    <box paddingLeft={3} paddingTop={1} flexDirection="column" flexShrink={0}>
+      <TargetMarker part={part()} item={props.item} role={roleLabel(props.item.role)} time={props.item.timeCreated} theme={props.theme} />
+      <text fg={props.theme.textMuted}>{truncate(props.item.text.trim(), 800)}</text>
+    </box>
+  )
+}
 
 const splitBorderChars = {
   topLeft: "",

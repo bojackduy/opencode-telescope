@@ -221,6 +221,14 @@ search 2+ results -> result 1 -> result 2 -> d/u in preview -> result 1
 
 Expected behavior: result 1 preview re-centers on its match instead of retaining result 2's preview scroll offset.
 
+### Preview Navigation Isolation
+
+- Initial preview loading runs in `preview-worker.ts` after a 40ms navigation debounce.
+- Selecting another row terminates stale preview work instead of querying SQLite on the TUI thread.
+- The old preview is cleared immediately so it is not re-rendered against the newly selected result.
+- Initial context is limited to 6 parts before and 10 after the hit; normal preview pagination remains available.
+- The loading/empty state renders an 800-character plain-text excerpt instead of parsing the full result as Markdown.
+
 ## Debugging Instructions
 
 Run OpenCode with Telescope debug logging:

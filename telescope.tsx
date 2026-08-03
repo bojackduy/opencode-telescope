@@ -7,7 +7,6 @@ import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
 import { EmptyState, ResultRow, SkeletonRow } from "./components/result-list.tsx"
 import {
   loadConversationAfter,
-  loadConversationAround,
   loadConversationBefore,
   parseSearchQuery,
   parseSemanticConfig,
@@ -64,10 +63,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const RESULT_BATCH_VIEWPORTS = 4
   const RESULT_PREFETCH_VIEWPORTS = 5
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
-  const INITIAL_PREVIEW_BEFORE = 20
-  const INITIAL_PREVIEW_AFTER = 30
+  const INITIAL_PREVIEW_BEFORE = 6
+  const INITIAL_PREVIEW_AFTER = 10
   const PREVIEW_PAGE_SIZE = 20
   const PREVIEW_PREFETCH_VIEWPORTS = 0.5
+  const PREVIEW_NAV_DEBOUNCE_MS = 40
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -113,6 +113,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let fallbackSearchRequestId: number | undefined
   let searchWorker: Worker | undefined
   let sourceSearchWorker: Worker | undefined
+  let previewWorker: Worker | undefined
   let indexWorker: Worker | undefined
   let indexJobId = 0
   const activeIndexJobs = new Set<string>()
@@ -154,11 +155,19 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let pendingPreviewAnchorCorrection: { anchorPartID: string; visualOffset: number; createdAt: number; expiresAt: number } | undefined
   let pendingPreviewTarget: { itemID: string; targetID: string; generation: number; attempts: number; alignedAttempts: number; createdAt: number } | undefined
   let previewTargetTimer: ReturnType<typeof setTimeout> | undefined
+  let previewLoadTimer: ReturnType<typeof setTimeout> | undefined
+  let previewLoadRequestId = 0
   const previewMeasuredHeights = new Map<string, number>()
   const cancelPreviewTargetAlignment = () => {
     if (previewTargetTimer) clearTimeout(previewTargetTimer)
     previewTargetTimer = undefined
     pendingPreviewTarget = undefined
+  }
+  const cancelPreviewLoad = () => {
+    if (previewLoadTimer) clearTimeout(previewLoadTimer)
+    previewLoadTimer = undefined
+    previewWorker?.terminate()
+    previewWorker = undefined
   }
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
@@ -430,6 +439,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     clearSearchWatchdog()
     cancelSourceFallback()
     cancelPreviewPrefetch()
+    cancelPreviewLoad()
     searchWorker?.terminate()
     searchWorker = undefined
     indexWorker?.terminate()
@@ -1364,6 +1374,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (!item) {
       if (lastPreviewItemId) nextPreviewGeneration("no-item", lastPreviewItemId)
       lastPreviewItemId = ""
+      cancelPreviewLoad()
       cancelPreviewPrefetch()
       setPreviewParts([])
       previewMeasuredHeights.clear()
@@ -1377,37 +1388,84 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     if (item.id === lastPreviewItemId) return
     lastPreviewItemId = item.id
     const generation = nextPreviewGeneration("selected-item", item.id)
+    const requestId = ++previewLoadRequestId
+    cancelPreviewLoad()
     cancelPreviewPrefetch()
+    solidBatch(() => {
+      setPreviewParts([])
+      setHasMorePreviewBefore(false)
+      setHasMorePreviewAfter(false)
+      setPreviewWindow({ start: 0, end: 0 })
+      setPreviewHeightVersion((value) => value + 1)
+    })
     previewMeasuredHeights.clear()
-    setPreviewHeightVersion((value) => value + 1)
-    setPreviewWindow({ start: 0, end: 0 })
     const previousScrollTop = previewScroll?.scrollTop ?? 0
     previewScroll?.scrollTo(0)
     debug.log("preview:reset-scroll", { item: item.id, generation, previousScrollTop, nextScrollTop: previewScroll?.scrollTop ?? 0 })
     debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
     const db = dbPath()
     debug.time("preview:load")
-    try {
-      const page = loadConversationAround(item, { before: INITIAL_PREVIEW_BEFORE, after: INITIAL_PREVIEW_AFTER, dbPath: db })
-      debug.log("preview:init", {
-        item: item.id,
-        session: item.sessionID,
-        parts: page.parts.length,
-        hasMoreBefore: page.hasMoreBefore,
-        hasMoreAfter: page.hasMoreAfter,
-        first: page.parts[0]?.id,
-        last: page.parts.at(-1)?.id,
-      })
-      setPreviewParts(page.parts)
-      setHasMorePreviewBefore(page.hasMoreBefore)
-      setHasMorePreviewAfter(page.hasMoreAfter)
-      setTimeout(() => {
-        if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-initial-timer")) return
-        queuePreviewTargetAlignment(item, "new-item", generation)
-      }, 1)
-    } catch {}
-    debug.timeEnd("nav:total")
-    debug.timeEnd("preview:load")
+    previewLoadTimer = setTimeout(() => {
+      previewLoadTimer = undefined
+      if (!isCurrentPreviewGeneration(generation, item.id, "preview:worker:start")) return
+      try {
+        previewWorker = new Worker(new URL("./preview-worker.ts", import.meta.url))
+        previewWorker.onmessage = (event: MessageEvent) => {
+          const msg = event.data
+          if (msg.id !== requestId || msg.itemID !== item.id || !isCurrentPreviewGeneration(generation, item.id, "preview:worker:result")) return
+          previewWorker?.terminate()
+          previewWorker = undefined
+          if (msg.type === "preview-error") {
+            debug.log("preview:worker:error", msg.error)
+            debug.timeEnd("nav:total")
+            debug.timeEnd("preview:load")
+            return
+          }
+          const page = msg.page
+          debug.log("preview:init", {
+            item: item.id,
+            session: item.sessionID,
+            parts: page.parts.length,
+            hasMoreBefore: page.hasMoreBefore,
+            hasMoreAfter: page.hasMoreAfter,
+            first: page.parts[0]?.id,
+            last: page.parts.at(-1)?.id,
+          })
+          solidBatch(() => {
+            setPreviewParts(page.parts)
+            setHasMorePreviewBefore(page.hasMoreBefore)
+            setHasMorePreviewAfter(page.hasMoreAfter)
+          })
+          setTimeout(() => {
+            if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-initial-timer")) return
+            queuePreviewTargetAlignment(item, "new-item", generation)
+          }, 1)
+          debug.timeEnd("nav:total")
+          debug.timeEnd("preview:load")
+        }
+        previewWorker.onerror = (err) => {
+          if (!isCurrentPreviewGeneration(generation, item.id, "preview:worker:onerror")) return
+          debug.log("preview:worker:error", err.message)
+          previewWorker?.terminate()
+          previewWorker = undefined
+          debug.timeEnd("nav:total")
+          debug.timeEnd("preview:load")
+        }
+        previewWorker.postMessage({
+          type: "preview-around",
+          id: requestId,
+          result: item,
+          before: INITIAL_PREVIEW_BEFORE,
+          after: INITIAL_PREVIEW_AFTER,
+          dbPath: db,
+        })
+      } catch (err) {
+        previewWorker = undefined
+        debug.log("preview:worker:create-error", err instanceof Error ? err.message : String(err))
+        debug.timeEnd("nav:total")
+        debug.timeEnd("preview:load")
+      }
+    }, PREVIEW_NAV_DEBOUNCE_MS)
   })
 
   let lastBeforeLoadMs = 0

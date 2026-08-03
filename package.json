@@ -56,6 +56,7 @@
     "search.ts",
     "search-worker.ts",
     "source-search-worker.ts",
+    "preview-worker.ts",
     "index-worker.ts",
     "search",
     "components",
