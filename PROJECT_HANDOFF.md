@@ -17,7 +17,7 @@ Core principles:
 - Bare search should be low-noise and fast.
 - Bare search searches user prompts and assistant replies only.
 - Thoughts, patches, file names inside patches, and tool content are opt-in via explicit scopes.
-- Search should use Telescope's sidecar index in normal operation. A bounded source-DB fallback is allowed only in its own worker while the sidecar is missing, indexing, or slow.
+- Search should use Telescope's last-good sidecar index in normal operation, including while incremental synchronization runs. A bounded source-DB fallback is allowed only when no usable sidecar rows exist.
 - Semantic/vector search is optional and opt-in only.
 - Preview and jump behavior should be reliable even when OpenCode does not render every indexed part.
 
@@ -102,7 +102,11 @@ Important files:
   - Bounded source-DB fallback worker used while the sidecar is unavailable or slow.
 
 - `index-worker.ts`
-  - Background keyword sidecar rebuilds.
+  - Batched incremental keyword synchronization and one-time scoped-FTS construction.
+
+- `worker-service.ts`
+  - Persistent search, preview, and index workers shared across dialog openings.
+  - Promise-based request routing, index synchronization coalescing, and plugin-lifecycle cleanup.
 
 - `components/preview.tsx`
   - Preview rendering for user, assistant, reasoning/thought, and tool parts.
@@ -154,20 +158,27 @@ Remaining risk:
 
 - Vector index build/rebuild lifecycle still needs deeper work. See `Known Issues`.
 
-### Slow Or Missing Sidecar Fallback
+### Persistent Search And Incremental Indexing
 
 Implemented:
 
-- `searchSourceFallbackWithStatus()` searches a bounded recent source-DB window without opening the sidecar.
-- `source-search-worker.ts` keeps this work off the TUI thread and separate from a sidecar lock.
-- The picker starts fallback immediately when indexing is known, when sidecar status is missing/empty/indexing, or after a one-second sidecar-search delay.
-- The previous three-second search-worker timeout now degrades to source fallback instead of showing an empty indexing state.
-- Fallback honors directory, owner, and `user:`, `assistant:`, `thought:`, `patch:`, and `tool:` query semantics.
-- Fallback uses staged reads over recent sessions, indexed messages, and indexed parts instead of a full-table JSON/sort query.
-- Fallback is intentionally partial: at most 32 sessions, 24 messages per session, 16 parts per message, 1,200 indexable parts, or 750ms of worker processing.
-- A new full index rebuild starts only after fallback returns, avoiding immediate CPU/disk competition on weak machines.
-- Source fallback has a 2.5-second safety timeout; timeout/error remains nonfatal while background indexing continues.
-- The active query refreshes through full FTS when indexing completes.
+- `worker-service.ts` prewarms and preserves search/preview/index workers for the full plugin lifecycle.
+- Search, result pagination, and preview pagination no longer call SQLite from `telescope.tsx`.
+- Existing sidecar rows remain searchable while synchronization runs; active indexing never forces source fallback.
+- Source freshness uses a `part.rowid` checkpoint instead of source DB `mtimeMs` or connection-local `PRAGMA data_version`.
+- Normal synchronization reconciles the latest 256 parts and appends new rows in 500-row transactions with cooperative sleeps.
+- OpenCode update/removal events debounce and coalesce synchronization requests.
+- Scoped FTS indexes hashed directory, role, kind, and tool tokens, so filtering happens inside FTS before ranking.
+- Scoped FTS is built in the background while the previous FTS remains queryable, then selected atomically through metadata.
+- `searchSourceFallbackWithStatus()` remains bounded and worker-only for first-run/missing-index behavior.
+- Expected worker failures and missing indexes degrade to fallback/empty indexing state; the picker no longer displays `database search failed`.
+
+Measured on the real local corpus (5.1GB source DB, 208,192 parts, approximately 74,000 indexed documents):
+
+- Warm persistent-worker search: about 8-25ms.
+- Cold scoped search: about 58-120ms, down from 950-1,120ms.
+- Normal incremental synchronization: about 90-110ms, down from 101 seconds after eliminating FTS `id` scans.
+- Largest-session indexed preview query: about 33ms, down from about 390ms.
 
 Logs:
 
@@ -223,11 +234,13 @@ Expected behavior: result 1 preview re-centers on its match instead of retaining
 
 ### Preview Navigation Isolation
 
-- Initial preview loading runs in `preview-worker.ts` after a 40ms navigation debounce.
-- Selecting another row terminates stale preview work instead of querying SQLite on the TUI thread.
+- Initial preview loading runs through the persistent preview worker after a 100ms navigation debounce.
+- Selecting another row invalidates stale preview results without starting or terminating workers from the keypress path.
 - The old preview is cleared immediately so it is not re-rendered against the newly selected result.
 - Initial context is limited to 6 parts before and 10 after the hit; normal preview pagination remains available.
 - The loading/empty state renders an 800-character plain-text excerpt instead of parsing the full result as Markdown.
+- Rich user, assistant, and reasoning content is clipped to bounded excerpts before Markdown rendering.
+- Preview source reads traverse indexed messages and per-message parts instead of sorting every part in a session.
 
 ## Debugging Instructions
 
@@ -332,33 +345,22 @@ Intent:
 - If yes, include title in result matching/snippets.
 - If no, make `session_title` unindexed in FTS.
 
-5. `PRAGMA data_version` staleness check is fragile across connections.
+5. Resolved: source staleness no longer depends on `PRAGMA data_version` or DB mtime.
 
 Evidence:
 
 - `source_data_version` is persisted and later compared.
 - SQLite `data_version` is connection-local.
 
-Intent:
+Resolution:
 
-- Prefer source file `mtimeMs`, source path, row counts, explicit index version, and extractor version.
-- Consider removing persisted `data_version` or using it only as a best-effort hint.
+- Incremental synchronization persists `source_max_part_rowid` and is triggered by OpenCode events plus plugin startup reconciliation.
 
-6. Load-more still runs search directly on the TUI path.
+6. Resolved: all result pagination runs through the persistent search worker.
 
-Evidence:
+Resolution:
 
-- Initial search uses `search-worker.ts`.
-- Result load-more/load-before calls `performSearch()` directly from `telescope.tsx`.
-
-Impact:
-
-- With vector enabled, load-more can do embedding/network/vector SQLite work on the UI path.
-
-Intent:
-
-- Route pagination requests through `search-worker.ts` too.
-- Preserve request IDs to avoid stale page commits.
+- `searchInWorker()` handles initial, next-page, and previous-page requests with request IDs.
 
 7. Pagination ordering lacks stable tie-breakers.
 

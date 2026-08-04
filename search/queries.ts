@@ -54,15 +54,18 @@ const SOURCE_FALLBACK_SESSION_LIMIT = 32
 const SOURCE_FALLBACK_MESSAGES_PER_SESSION = 24
 const SOURCE_FALLBACK_PARTS_PER_MESSAGE = 16
 const SOURCE_FALLBACK_TIME_BUDGET_MS = 750
+const INDEX_SYNC_BATCH_SIZE = 500
+const INDEX_RECONCILE_TAIL = 2_048
+const INDEX_UPDATE_RECONCILE_TAIL = 256
+const SCOPED_FTS_BUILD_BATCH_SIZE = 1_000
 
 export function searchSessionMessagesWithStatus(query: string, options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const parsed = parseSearchQuery(query)
   if (!parsed.term) return searchResponse([], "ready")
   if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
-  const db = getDb(dbPath)
   const index = openSearchIndex(dbPath)
-  const status = readKeywordIndexState(db, index, dbPath)
+  const status = readKeywordIndexState(index, dbPath)
   const rows = canQueryKeywordIndex(status.state) ? queryFtsRows(index, parsed, options?.limit ?? 80, options?.directory, options?.offset, options?.role) : []
   return searchResponse(rows.flatMap((row) => rowToSearchResult(row, row.matchTerm ?? parsed.term) ?? []), status.state, getVectorState(index))
 }
@@ -229,10 +232,9 @@ export function recentSessionMessages(options?: { limit?: number; offset?: numbe
 export function recentSessionMessagesWithStatus(options?: { limit?: number; offset?: number; dbPath?: string; directory?: string; role?: SearchRole }): SearchResponse {
   const dbPath = options?.dbPath ?? resolveDatabasePath()
   if (dbPath === ":memory:") return searchResponse([], "missing")
-  const db = getDb(dbPath)
   const limit = options?.limit ?? 40
   const index = openSearchIndex(dbPath)
-  const status = readKeywordIndexState(db, index, dbPath)
+  const status = readKeywordIndexState(index, dbPath)
   const rows = canQueryKeywordIndex(status.state) ? queryRecentRows(index, limit, options?.directory, options?.offset, options?.role) : []
   if (!rows.length && (status.state === "missing" || status.state === "empty" || status.state === "indexing")) {
     debug.log("query:recent:index-pending", { state: status.state, limit, offset: options?.offset ?? 0, directory: options?.directory, role: options?.role })
@@ -245,6 +247,7 @@ export function loadConversationAround(result: SearchResult, options?: { before?
   const db = getDb(options?.dbPath)
   const before = options?.before ?? 3
   const after = options?.after ?? 6
+  if (tableHasColumn(db, "message", "time_created")) return loadIndexedConversationAround(db, result, before, after)
 
   debug.time("preview:query:hit")
   const hit = db.query<{ time_created: number }, [string]>(
@@ -337,6 +340,7 @@ export function loadConversationBefore(result: SearchResult, cursor: Conversatio
   debug.time("preview:query:before-page")
   const db = getDb(options?.dbPath)
   const limit = options?.limit ?? 20
+  if (tableHasColumn(db, "message", "time_created")) return loadIndexedConversationBefore(db, result, cursor, limit)
   const fetchLimit = Math.max(limit * 4, limit + 1, 30)
   const rows = db.query<ConversationRow, [string, number, number, string, number]>(`
     SELECT p.id, p.message_id, p.session_id,
@@ -375,6 +379,7 @@ export function loadConversationAfter(result: SearchResult, cursor: Conversation
   debug.time("preview:query:after-page")
   const db = getDb(options?.dbPath)
   const limit = options?.limit ?? 20
+  if (tableHasColumn(db, "message", "time_created")) return loadIndexedConversationAfter(db, result, cursor, limit)
   const fetchLimit = Math.max(limit * 4, limit + 1, 30)
   const rows = db.query<ConversationRow, [string, number, number, string, number]>(`
     SELECT p.id, p.message_id, p.session_id,
@@ -435,14 +440,13 @@ export async function semanticSearchSessionMessagesWithStatus(query: string, opt
   if (!parsed.term) return searchResponse([], "ready")
   if (options?.dbPath === ":memory:") return searchResponse([], "missing")
   const dbPath = options?.dbPath ?? resolveDatabasePath()
-  const db = getDb(dbPath)
   const limit = options?.limit ?? 80
   const offset = options?.offset ?? 0
   const dir = options?.directory
   const role = options?.role
 
   const index = openSearchIndex(dbPath)
-  const status = readKeywordIndexState(db, index, dbPath)
+  const status = readKeywordIndexState(index, dbPath)
   const config = parseSemanticConfig()
   const useHybridWindow = !parsed.explicitScope && !config.disableVector && isVectorReady(index)
   const windowLimit = useHybridWindow ? Math.max(limit + offset, 200) : limit
@@ -546,12 +550,13 @@ export function openSearchIndex(sourcePath: string) {
     _indexDb = new Database(indexPath)
     _indexDbPath = indexPath
     migrateSearchIndex(_indexDb)
-    vecExtensionLoading.set(indexPath, loadVecExtension(_indexDb).then(() => {}).catch(() => {}))
+    const config = parseSemanticConfig()
+    vecExtensionLoading.set(indexPath, config.disableVector ? Promise.resolve() : loadVecExtension(_indexDb).then(() => {}).catch(() => {}))
   }
   return _indexDb
 }
 
-export function readKeywordIndexState(source: Database, index: Database, sourcePath: string): KeywordIndexStatus {
+export function readKeywordIndexState(index: Database, sourcePath: string): KeywordIndexStatus {
   try {
     const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) as count FROM document_index").get()?.count ?? 0
     const storedState = getMeta(index, "keyword_index_state")
@@ -559,12 +564,9 @@ export function readKeywordIndexState(source: Database, index: Database, sourceP
     if (storedState === "error" && rowCount === 0) return { state: "error", rowCount }
     if (rowCount === 0) return { state: "empty", rowCount }
 
-    const state = sourceState(source, sourcePath)
-    const currentDataVersion = getMeta(index, "source_data_version")
-    const currentMtimeMs = getMeta(index, "source_mtime_ms")
     const currentPath = getMeta(index, "source_path")
     const currentIndexVersion = getMeta(index, "index_version")
-    const stale = currentPath !== sourcePath || currentDataVersion !== String(state.dataVersion) || currentMtimeMs !== String(state.mtimeMs) || currentIndexVersion !== SEARCH_INDEX_VERSION
+    const stale = storedState === "indexing" || currentPath !== sourcePath || currentIndexVersion !== SEARCH_INDEX_VERSION
     return { state: stale ? "stale" : "ready", rowCount }
   } catch (err) {
     debug.log("keyword:index:state-error", err instanceof Error ? err.message : String(err))
@@ -603,6 +605,9 @@ function queryFtsRows(index: Database, query: ParsedSearchQuery, limit: number, 
 function queryFtsClause(index: Database, clause: SearchQueryClause, limit: number, directory?: string, offset?: number, role?: SearchRole, hasExplicitScope = false, clauseIndex = 0) {
   const match = ftsQuery(clause.term)
   if (!match) return []
+  if (getMeta(index, "scoped_fts_state") === "ready") {
+    return queryScopedFtsClause(index, clause, match, limit, directory, offset, role, hasExplicitScope, clauseIndex)
+  }
   const conditions = ["document_fts MATCH ?"]
   const params: (string | number)[] = [match]
   if (clause.kind) {
@@ -640,6 +645,49 @@ function queryFtsClause(index: Database, clause: SearchQueryClause, limit: numbe
   return rows.map((row, clauseRowIndex) => ({ ...row, matchTerm: clause.term, clauseIndex, clauseRowIndex }))
 }
 
+function queryScopedFtsClause(index: Database, clause: SearchQueryClause, textMatch: string, limit: number, directory?: string, offset?: number, role?: SearchRole, hasExplicitScope = false, clauseIndex = 0) {
+  const scopeTerms: string[] = []
+  if (directory) scopeTerms.push(`scope:${scopeDirectoryToken(directory)}`)
+  if (clause.kind) scopeTerms.push(`scope:k${clause.kind}`)
+  else if (clause.tool) scopeTerms.push(`scope:t${scopeValue(clause.tool)}`)
+  else scopeTerms.push("(scope:kuser OR scope:kassistant)")
+  if (role && !hasExplicitScope) scopeTerms.push(`scope:r${role}`)
+  const scopedMatch = [`text : (${textMatch})`, ...scopeTerms].join(" AND ")
+  const params: (string | number)[] = [scopedMatch]
+  const conditions = ["document_fts_scope MATCH ?"]
+  if (directory) {
+    conditions.push("directory = ?")
+    params.push(directory)
+  }
+  if (clause.kind) {
+    conditions.push("kind = ?")
+    params.push(clause.kind)
+  }
+  if (clause.tool) {
+    conditions.push("tool = ?")
+    params.push(clause.tool)
+  }
+  if (role && !hasExplicitScope) {
+    conditions.push("role = ?")
+    params.push(role)
+  }
+  params.push(limit)
+  if (offset) params.push(offset)
+  const offsetClause = offset ? "OFFSET ?" : ""
+  debug.time("query:fts:scoped-exec")
+  const rows = index.query<Row & { rank: number }, (string | number)[]>(`
+    SELECT id, message_id, session_id, session_title, directory, kind, role, part_type, tool,
+           CAST(time_created AS INTEGER) AS time_created, text,
+           bm25(document_fts_scope, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1) AS rank
+    FROM document_fts_scope
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY rank, CAST(time_created AS INTEGER) DESC
+    LIMIT ? ${offsetClause}
+  `).all(...params as any[])
+  debug.timeEnd("query:fts:scoped-exec")
+  return rows.map((row, clauseRowIndex) => ({ ...row, matchTerm: clause.term, clauseIndex, clauseRowIndex }))
+}
+
 function queryRecentRows(index: Database, limit: number, directory?: string, offset?: number, role?: SearchRole) {
   const conditions: string[] = ["kind IN ('user', 'assistant')"]
   const params: (string | number)[] = []
@@ -674,6 +722,247 @@ export function rebuildKeywordIndexForDbPath(dbPath: string) {
   const index = openSearchIndex(dbPath)
   const state = sourceState(source, dbPath)
   rebuildKeywordIndex(source, index, dbPath, state)
+}
+
+type IncrementalSourceRow = {
+  source_rowid: number
+  id: string
+  message_id: string
+  session_id: string
+  session_title: string | null
+  directory: string
+  message_data: string
+  time_created: number
+  data: string
+}
+
+export async function syncKeywordIndexForDbPath(dbPath: string) {
+  const source = getDb(dbPath)
+  const index = openSearchIndex(dbPath)
+  const sourceMaxRowid = source.query<{ max_rowid: number }, []>("SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM part").get()?.max_rowid ?? 0
+  const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM document_index").get()?.count ?? 0
+  const storedCheckpoint = Number(getMeta(index, "source_max_part_rowid") ?? 0)
+  const storedVersion = getMeta(index, "index_version")
+  let checkpoint = storedCheckpoint
+
+  // Existing indexes predate row checkpoints. Reconcile their recent tail once,
+  // preserving the last-good corpus instead of rebuilding it from the source DB.
+  if ((!storedCheckpoint || storedVersion !== SEARCH_INDEX_VERSION) && rowCount > 0) {
+    checkpoint = Math.max(0, sourceMaxRowid - INDEX_RECONCILE_TAIL)
+  } else if (rowCount > 0) {
+    checkpoint = Math.max(0, Math.min(storedCheckpoint, sourceMaxRowid) - INDEX_UPDATE_RECONCILE_TAIL)
+  }
+
+  setMeta(index, "keyword_index_state", "indexing")
+  const scopedFtsReady = getMeta(index, "scoped_fts_state") === "ready"
+  const maintainLegacyFts = rowCount === 0
+  let processed = 0
+  while (checkpoint < sourceMaxRowid) {
+    const rows = source.query<IncrementalSourceRow, [number, number]>(`
+      SELECT p.rowid AS source_rowid, p.id, p.message_id, p.session_id,
+             s.title AS session_title, s.directory, m.data AS message_data,
+             p.time_created, p.data
+      FROM part p
+      JOIN message m ON m.id = p.message_id
+      JOIN session s ON s.id = p.session_id
+      WHERE p.rowid > ?
+      ORDER BY p.rowid
+      LIMIT ?
+    `).all(checkpoint, INDEX_SYNC_BATCH_SIZE)
+    if (rows.length === 0) break
+
+    index.exec("BEGIN IMMEDIATE")
+    try {
+      for (const row of rows) replaceIndexedPart(index, row, scopedFtsReady, maintainLegacyFts)
+      checkpoint = rows.at(-1)!.source_rowid
+      processed += rows.length
+      setMeta(index, "source_max_part_rowid", String(checkpoint))
+      index.exec("COMMIT")
+    } catch (err) {
+      index.exec("ROLLBACK")
+      setMeta(index, "keyword_index_state", "error")
+      throw err
+    }
+
+    // Keep indexing cooperative on low-CPU machines.
+    await Bun.sleep(5)
+  }
+
+  const state = sourceState(source, dbPath)
+  setMeta(index, "source_path", dbPath)
+  setMeta(index, "source_data_version", String(state.dataVersion))
+  setMeta(index, "source_mtime_ms", String(state.mtimeMs))
+  setMeta(index, "source_max_part_rowid", String(Math.max(checkpoint, sourceMaxRowid)))
+  setMeta(index, "index_version", SEARCH_INDEX_VERSION)
+  setMeta(index, "keyword_index_state", "ready")
+  if (getMeta(index, "vector_state") === "enabled") setMeta(index, "vector_state", "stale")
+  await buildScopedFtsIndex(index)
+  debug.log("fts:sync", { processed, from: storedCheckpoint, checkpoint: Math.max(checkpoint, sourceMaxRowid), sourceMaxRowid })
+}
+
+export function removeIndexedRowsForDbPath(dbPath: string, target: { partID?: string; messageID?: string; sessionID?: string }) {
+  const index = openSearchIndex(dbPath)
+  const filter = target.partID ? ["id", target.partID] : target.messageID ? ["message_id", target.messageID] : target.sessionID ? ["session_id", target.sessionID] : undefined
+  if (!filter) return
+  const [column, value] = filter
+  const rows = index.query<{ rowid: number }, [string]>(`SELECT rowid FROM document_index WHERE ${column} = ?`).all(value)
+  index.exec("BEGIN IMMEDIATE")
+  try {
+    if (getMeta(index, "scoped_fts_state") === "ready") {
+      const deleteScoped = index.query("DELETE FROM document_fts_scope WHERE rowid = ?")
+      for (const row of rows) deleteScoped.run(row.rowid)
+    }
+    index.query(`DELETE FROM document_index WHERE ${column} = ?`).run(value)
+    const documentColumn = column === "id" ? "part_id" : column
+    index.query(`DELETE FROM document WHERE ${documentColumn} = ?`).run(value)
+    if (getMeta(index, "vector_state") === "enabled") setMeta(index, "vector_state", "stale")
+    index.exec("COMMIT")
+  } catch (err) {
+    index.exec("ROLLBACK")
+    throw err
+  }
+}
+
+function replaceIndexedPart(index: Database, source: IncrementalSourceRow, scopedFtsReady: boolean, maintainLegacyFts: boolean) {
+  const role = sourceMessageRole(source.message_data)
+  const metadata = sourcePartMetadata(source.data)
+  const existing = index.query<{ rowid: number }, [string]>("SELECT rowid FROM document_index WHERE id = ?").get(source.id)
+  if (!role || !metadata) {
+    if (scopedFtsReady && existing) index.query("DELETE FROM document_fts_scope WHERE rowid = ?").run(existing.rowid)
+    if (maintainLegacyFts && existing) index.query("DELETE FROM document_fts WHERE rowid = ?").run(existing.rowid)
+    index.query("DELETE FROM document_index WHERE id = ?").run(source.id)
+    index.query("DELETE FROM document WHERE doc_id = ?").run(`telescope:${source.session_id}:${source.message_id}:${source.id}:0`)
+    return
+  }
+
+  const sourceRow: IndexSourceRow = {
+    id: source.id,
+    message_id: source.message_id,
+    session_id: source.session_id,
+    session_title: source.session_title,
+    directory: source.directory,
+    role,
+    part_type: metadata.partType,
+    tool: metadata.tool,
+    time_created: source.time_created,
+    data: source.data,
+  }
+  const now = Date.now()
+  for (const row of indexSourceRowToRows(sourceRow)) {
+    const docID = `telescope:${row.session_id}:${row.message_id}:${row.id}:0`
+    index.query(`
+      INSERT INTO document(doc_id, part_id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, chunk_index, text, source_hash, extractor_version, indexed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(doc_id) DO UPDATE SET
+        part_id = excluded.part_id,
+        message_id = excluded.message_id,
+        session_id = excluded.session_id,
+        session_title = excluded.session_title,
+        directory = excluded.directory,
+        kind = excluded.kind,
+        role = excluded.role,
+        part_type = excluded.part_type,
+        tool = excluded.tool,
+        time_created = excluded.time_created,
+        text = excluded.text,
+        source_hash = excluded.source_hash,
+        extractor_version = excluded.extractor_version,
+        indexed_at = excluded.indexed_at
+    `).run(docID, row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, row.kind ?? "assistant", row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, 0, row.text, hashPartData({ session_id: row.session_id, message_id: row.message_id, part_id: row.id }), DOCUMENT_EXTRACTOR_VERSION, now)
+    index.query(`
+      INSERT INTO document_index(id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        message_id = excluded.message_id,
+        session_id = excluded.session_id,
+        session_title = excluded.session_title,
+        directory = excluded.directory,
+        kind = excluded.kind,
+        role = excluded.role,
+        part_type = excluded.part_type,
+        tool = excluded.tool,
+        time_created = excluded.time_created,
+        text = excluded.text
+    `).run(row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, row.kind ?? "assistant", row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, row.text)
+    if (scopedFtsReady) {
+      const documentRowid = index.query<{ rowid: number }, [string]>("SELECT rowid FROM document_index WHERE id = ?").get(row.id)!.rowid
+      index.query("DELETE FROM document_fts_scope WHERE rowid = ?").run(documentRowid)
+      insertScopedFtsRow(index, row, documentRowid)
+    } else if (maintainLegacyFts) {
+      const documentRowid = index.query<{ rowid: number }, [string]>("SELECT rowid FROM document_index WHERE id = ?").get(row.id)!.rowid
+      index.query("DELETE FROM document_fts WHERE rowid = ?").run(documentRowid)
+      insertLegacyFtsRow(index, row, documentRowid)
+    }
+  }
+}
+
+async function buildScopedFtsIndex(index: Database) {
+  if (getMeta(index, "scoped_fts_state") === "ready") return
+  setMeta(index, "scoped_fts_state", "building")
+  index.exec("DELETE FROM document_fts_scope")
+  let rowid = 0
+  let inserted = 0
+  while (true) {
+    const rows = index.query<Row & { source_rowid: number }, [number, number]>(`
+      SELECT rowid AS source_rowid, id, message_id, session_id, session_title, directory,
+             kind, role, part_type, tool, time_created, text
+      FROM document_index
+      WHERE rowid > ?
+      ORDER BY rowid
+      LIMIT ?
+    `).all(rowid, SCOPED_FTS_BUILD_BATCH_SIZE)
+    if (rows.length === 0) break
+    index.exec("BEGIN IMMEDIATE")
+    try {
+      for (const row of rows) insertScopedFtsRow(index, row, row.source_rowid)
+      rowid = rows.at(-1)!.source_rowid
+      inserted += rows.length
+      index.exec("COMMIT")
+    } catch (err) {
+      index.exec("ROLLBACK")
+      setMeta(index, "scoped_fts_state", "error")
+      throw err
+    }
+    await Bun.sleep(5)
+  }
+  setMeta(index, "scoped_fts_state", "ready")
+  debug.log("fts:scoped-build", { inserted })
+}
+
+function insertScopedFtsRow(index: Database, row: Row, rowid?: number) {
+  const kind = row.kind ?? "assistant"
+  const scope = [
+    scopeDirectoryToken(row.directory),
+    `k${scopeValue(kind)}`,
+    `r${scopeValue(row.role)}`,
+    row.tool ? `t${scopeValue(row.tool)}` : "",
+  ].filter(Boolean).join(" ")
+  if (rowid === undefined) {
+    index.query(`
+      INSERT INTO document_fts_scope(id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, scope, text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, kind, row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, scope, row.text)
+    return
+  }
+  index.query(`
+    INSERT INTO document_fts_scope(rowid, id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, scope, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(rowid, row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, kind, row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, scope, row.text)
+}
+
+function insertLegacyFtsRow(index: Database, row: Row, rowid: number) {
+  index.query(`
+    INSERT INTO document_fts(rowid, id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(rowid, row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, row.kind ?? "assistant", row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, row.text)
+}
+
+function scopeDirectoryToken(directory: string) {
+  return `d${createHash("sha1").update(directory).digest("hex").slice(0, 20)}`
+}
+
+function scopeValue(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "")
 }
 
 function sourceState(db: Database, sourcePath: string) {
@@ -780,6 +1069,8 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
     setMeta(index, "source_path", sourcePath)
     setMeta(index, "source_data_version", String(state.dataVersion))
     setMeta(index, "source_mtime_ms", String(state.mtimeMs))
+    const sourceMaxRowid = source.query<{ max_rowid: number }, []>("SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM part").get()?.max_rowid ?? 0
+    setMeta(index, "source_max_part_rowid", String(sourceMaxRowid))
     setMeta(index, "index_version", SEARCH_INDEX_VERSION)
     setMeta(index, "schema_version", "2")
     setMeta(index, "extractor_version", DOCUMENT_EXTRACTOR_VERSION)
@@ -806,6 +1097,116 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
 function isPreviewRow(row: ConversationRow) {
   return (row.role === "user" || row.role === "assistant") &&
     (row.type === "text" || row.type === "reasoning" || row.type === "tool")
+}
+
+const PREVIEW_MESSAGE_WINDOW = 64
+
+function loadIndexedConversationAround(db: Database, result: SearchResult, before: number, after: number): ConversationPreviewPage {
+  debug.time("preview:query:indexed-around")
+  const window = indexedPreviewWindow(db, result.sessionID, result.id)
+  const targetIndex = window.rows.findIndex((row) => row.id === result.id)
+  if (targetIndex === -1) {
+    debug.timeEnd("preview:query:indexed-around")
+    return { parts: [], hasMoreBefore: false, hasMoreAfter: false }
+  }
+  const start = Math.max(0, targetIndex - before)
+  const end = Math.min(window.rows.length, targetIndex + after + 1)
+  const parts = window.rows.slice(start, end).flatMap((row) => parseConversationPart(row, row.id === result.id) ?? [])
+  const page = {
+    parts,
+    hasMoreBefore: start > 0 || window.hasMoreBefore,
+    hasMoreAfter: end < window.rows.length || window.hasMoreAfter,
+  }
+  debug.log("preview:window", { item: result.id, session: result.sessionID, mode: "indexed-around", before, after, rows: window.rows.length, parts: parts.length, hasMoreBefore: page.hasMoreBefore, hasMoreAfter: page.hasMoreAfter })
+  debug.timeEnd("preview:query:indexed-around")
+  return page
+}
+
+function loadIndexedConversationBefore(db: Database, result: SearchResult, cursor: ConversationPreviewCursor, limit: number) {
+  debug.time("preview:query:indexed-before")
+  const window = indexedPreviewWindow(db, result.sessionID, cursor.id)
+  const targetIndex = window.rows.findIndex((row) => row.id === cursor.id)
+  if (targetIndex === -1) {
+    debug.timeEnd("preview:query:indexed-before")
+    return { parts: [], hasMoreBefore: false }
+  }
+  const start = Math.max(0, targetIndex - limit)
+  const parts = window.rows.slice(start, targetIndex).flatMap((row) => parseConversationPart(row, false) ?? [])
+  const page = { parts, hasMoreBefore: start > 0 || window.hasMoreBefore }
+  debug.timeEnd("preview:query:indexed-before")
+  return page
+}
+
+function loadIndexedConversationAfter(db: Database, result: SearchResult, cursor: ConversationPreviewCursor, limit: number) {
+  debug.time("preview:query:indexed-after")
+  const window = indexedPreviewWindow(db, result.sessionID, cursor.id)
+  const targetIndex = window.rows.findIndex((row) => row.id === cursor.id)
+  if (targetIndex === -1) {
+    debug.timeEnd("preview:query:indexed-after")
+    return { parts: [], hasMoreAfter: false }
+  }
+  const end = Math.min(window.rows.length, targetIndex + limit + 1)
+  const parts = window.rows.slice(targetIndex + 1, end).flatMap((row) => parseConversationPart(row, false) ?? [])
+  const page = { parts, hasMoreAfter: end < window.rows.length || window.hasMoreAfter }
+  debug.timeEnd("preview:query:indexed-after")
+  return page
+}
+
+function indexedPreviewWindow(db: Database, sessionID: string, targetPartID: string) {
+  const hit = db.query<{ message_id: string }, [string]>("SELECT message_id FROM part WHERE id = ?").get(targetPartID)
+  if (!hit) return { rows: [] as ConversationRow[], hasMoreBefore: false, hasMoreAfter: false }
+  const targetMessage = db.query<{ id: string; time_created: number }, [string]>("SELECT id, time_created FROM message WHERE id = ?").get(hit.message_id)
+  if (!targetMessage) return { rows: [] as ConversationRow[], hasMoreBefore: false, hasMoreAfter: false }
+
+  type PreviewMessage = { id: string; time_created: number; data: string }
+  const beforeMessages = db.query<PreviewMessage, [string, number, number, string, number]>(`
+    SELECT id, time_created, data
+    FROM message
+    WHERE session_id = ?
+      AND (time_created < ? OR (time_created = ? AND id <= ?))
+    ORDER BY time_created DESC, id DESC
+    LIMIT ?
+  `).all(sessionID, targetMessage.time_created, targetMessage.time_created, targetMessage.id, PREVIEW_MESSAGE_WINDOW)
+  const afterMessages = db.query<PreviewMessage, [string, number, number, string, number]>(`
+    SELECT id, time_created, data
+    FROM message
+    WHERE session_id = ?
+      AND (time_created > ? OR (time_created = ? AND id > ?))
+    ORDER BY time_created ASC, id ASC
+    LIMIT ?
+  `).all(sessionID, targetMessage.time_created, targetMessage.time_created, targetMessage.id, PREVIEW_MESSAGE_WINDOW)
+  const messages = [...beforeMessages.reverse(), ...afterMessages]
+  const rows: ConversationRow[] = []
+  for (const message of messages) {
+    const role = sourceMessageRole(message.data)
+    if (!role) continue
+    const parts = db.query<{ id: string; message_id: string; session_id: string; time_created: number; data: string }, [string]>(`
+      SELECT id, message_id, session_id, time_created, data
+      FROM part
+      WHERE message_id = ?
+      ORDER BY id
+    `).all(message.id)
+    for (const part of parts) {
+      const data = parsePartData(part.data)
+      const type = data?.type
+      if (type !== "text" && type !== "reasoning" && type !== "tool") continue
+      rows.push({ ...part, role, type })
+    }
+  }
+  rows.sort((a, b) => a.time_created - b.time_created || a.id.localeCompare(b.id))
+  debug.log("preview:indexed-source", {
+    sessionID,
+    targetPartID,
+    beforeMessages: beforeMessages.length,
+    afterMessages: afterMessages.length,
+    rows: rows.length,
+    targetFound: rows.some((row) => row.id === targetPartID),
+  })
+  return {
+    rows,
+    hasMoreBefore: beforeMessages.length >= PREVIEW_MESSAGE_WINDOW,
+    hasMoreAfter: afterMessages.length >= PREVIEW_MESSAGE_WINDOW,
+  }
 }
 
 function previewRowBreakdown(rows: ConversationRow[], validRows: ConversationRow[]) {

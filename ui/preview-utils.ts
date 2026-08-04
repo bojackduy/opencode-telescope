@@ -20,9 +20,9 @@ export function findOrderedTokenLine(lines: string[], query: string) {
   return -1
 }
 
-export function clippedText(text: string, query: string, radiusLines: number) {
+export function clippedText(text: string, query: string, radiusLines: number, maxChars = 30000, maxLines = 420) {
   const lines = text.split("\n")
-  const tooLarge = text.length > 30000 || lines.length > 420
+  const tooLarge = text.length > maxChars || lines.length > maxLines
   if (!tooLarge) return { text, clipped: false }
 
   const matchLine = findOrderedTokenLine(lines, query)

@@ -46,6 +46,8 @@ export {
   readKeywordIndexState,
   rebuildKeywordIndex,
   rebuildKeywordIndexForDbPath,
+  syncKeywordIndexForDbPath,
+  removeIndexedRowsForDbPath,
 } from "./search/queries.ts"
 
 // Re-exported text/snippet functions

@@ -16,6 +16,7 @@ import {
   performSearch,
   performSearchWithStatus,
   recentSessionMessages,
+  removeIndexedRowsForDbPath,
   rebuildKeywordIndexForDbPath,
   resolveDatabasePath,
   rowToSearchResult,
@@ -24,6 +25,7 @@ import {
   searchSessionMessagesWithStatus,
   searchSourceFallbackWithStatus,
   searchIndexPath,
+  syncKeywordIndexForDbPath,
   type SearchResult,
 } from "./search"
 import { setMeta } from "./search/schema.ts"
@@ -196,11 +198,13 @@ describe("session search helpers", () => {
     try {
       db.exec(`
         CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
-        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER NOT NULL, data TEXT);
         CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
       `)
       db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
-      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run("msg_1", "ses_1", 1, JSON.stringify({ role: "assistant" }))
       db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
         .run("prt_1", "msg_1", "ses_1", 1, JSON.stringify({ type: "text", text: "pendingSearchNeedle" }))
 
@@ -284,6 +288,48 @@ describe("session search helpers", () => {
     }
   })
 
+  test("incrementally syncs appended and recently updated parts without deleting existing documents", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-incremental-"))
+    const dbPath = path.join(dir, "opencode.db")
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+        CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT);
+        CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT);
+        CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
+      `)
+      db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Incremental", dir)
+      db.query("INSERT INTO message(id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)")
+        .run("msg_1", "ses_1", 1, 1, JSON.stringify({ role: "user" }))
+      const insertPart = db.query("INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)")
+      insertPart.run("prt_1", "msg_1", "ses_1", 1, 1, JSON.stringify({ type: "text", text: "firstIncrementalNeedle" }))
+
+      await syncKeywordIndexForDbPath(dbPath)
+      expect(searchSessionMessages("firstIncrementalNeedle", { dbPath, directory: dir }).map((item) => item.id)).toEqual(["prt_1"])
+
+      insertPart.run("prt_2", "msg_1", "ses_1", 2, 2, JSON.stringify({ type: "text", text: "secondIncrementalNeedle" }))
+      expect(searchSessionMessagesWithStatus("firstIncrementalNeedle", { dbPath, directory: dir }).keywordState).toBe("ready")
+      await syncKeywordIndexForDbPath(dbPath)
+      expect(searchSessionMessages("firstIncrementalNeedle", { dbPath, directory: dir }).map((item) => item.id)).toEqual(["prt_1"])
+      expect(searchSessionMessages("secondIncrementalNeedle", { dbPath, directory: dir }).map((item) => item.id)).toEqual(["prt_2"])
+
+      db.query("UPDATE part SET time_updated = ?, data = ? WHERE id = ?")
+        .run(3, JSON.stringify({ type: "text", text: "updatedIncrementalNeedle" }), "prt_2")
+      await syncKeywordIndexForDbPath(dbPath)
+      expect(searchSessionMessages("secondIncrementalNeedle", { dbPath, directory: dir })).toEqual([])
+      expect(searchSessionMessages("updatedIncrementalNeedle", { dbPath, directory: dir }).map((item) => item.id)).toEqual(["prt_2"])
+
+      removeIndexedRowsForDbPath(dbPath, { partID: "prt_2" })
+      expect(searchSessionMessages("updatedIncrementalNeedle", { dbPath, directory: dir })).toEqual([])
+      expect(searchSessionMessages("firstIncrementalNeedle", { dbPath, directory: dir }).map((item) => item.id)).toEqual(["prt_1"])
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("typed search returns stale sidecar rows without scanning source", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-search-stale-"))
     const dbPath = path.join(dir, "opencode.db")
@@ -357,7 +403,7 @@ describe("session search helpers", () => {
     }
   })
 
-  test("supports explicit scoped search filters", () => {
+  test("supports explicit scoped search filters", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "opencode-telescope-scoped-"))
     const dbPath = path.join(dir, "opencode.db")
     const db = new Database(dbPath)
@@ -388,6 +434,7 @@ describe("session search helpers", () => {
         }))
 
       rebuildKeywordIndexForDbPath(dbPath)
+      await syncKeywordIndexForDbPath(dbPath)
 
       const defaultIDs = searchSessionMessages("scopeNeedle", { dbPath, directory: dir, limit: 10 }).map((item) => item.id)
       expect(defaultIDs).toContain("prt_user")
@@ -628,11 +675,13 @@ describe("session search helpers", () => {
     try {
       db.exec(`
         CREATE TABLE session(id TEXT PRIMARY KEY, title TEXT, directory TEXT);
-        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+        CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER NOT NULL, data TEXT);
         CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
       `)
       db.query("INSERT INTO session(id, title, directory) VALUES (?, ?, ?)").run("ses_1", "Test", dir)
-      db.query("INSERT INTO message(id, session_id, data) VALUES (?, ?, ?)").run("msg_1", "ses_1", JSON.stringify({ role: "assistant" }))
+      db.query("INSERT INTO message(id, session_id, time_created, data) VALUES (?, ?, ?, ?)").run("msg_1", "ses_1", 1, JSON.stringify({ role: "assistant" }))
       for (let index = 0; index < 7; index++) {
         db.query("INSERT INTO part(id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)")
           .run(`prt_${index}`, "msg_1", "ses_1", index, JSON.stringify({ type: "text", text: `message ${index}` }))

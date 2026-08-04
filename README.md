@@ -91,6 +91,8 @@ The semantic path stays local-first:
 
 - OpenCode's SQLite database is opened read-only.
 - Derived keyword and vector indexes are stored in Telescope's sidecar database.
+- Keyword updates are incremental: Telescope serves the last-good index while new conversation parts synchronize in small background batches.
+- Search and preview workers stay warm across picker openings; keyboard navigation never performs SQLite work directly.
 - Embeddings are generated through your local `llama-server` endpoint.
 - If embeddings or `sqlite-vec` are unavailable, Telescope falls back to keyword search.
 

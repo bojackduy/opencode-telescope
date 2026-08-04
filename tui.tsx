@@ -1,8 +1,10 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { Telescope } from "./telescope.tsx"
+import { resolveDatabasePath } from "./search.ts"
 import { debug } from "./ui/debug.ts"
 import { loadTelescopeConfig } from "./ui/config.ts"
+import { disposeWorkerService, prewarmSearchWorker, removeFromIndex, requestIndexSync } from "./worker-service.ts"
 
 const id = "opencode-telescope"
 
@@ -17,6 +19,30 @@ const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
   if (!enabled(options)) return
 
   const config = loadTelescopeConfig()
+  const dbPath = resolveDatabasePath()
+  const directory = api.state.path.directory
+  prewarmSearchWorker({ dbPath, directory })
+  let indexTimer: ReturnType<typeof setTimeout> | undefined
+  const scheduleIndexSync = (delay = 500) => {
+    if (indexTimer) clearTimeout(indexTimer)
+    indexTimer = setTimeout(() => {
+      indexTimer = undefined
+      requestIndexSync(dbPath)
+    }, delay)
+  }
+  scheduleIndexSync(1_000)
+  const indexEvents = [
+    "session.updated",
+    "message.updated",
+    "message.part.updated",
+    "session.compacted",
+  ] as const
+  const unregisterIndexEvents = indexEvents.map((type) => api.event.on(type, () => scheduleIndexSync()))
+  unregisterIndexEvents.push(
+    api.event.on("message.part.removed", (event) => removeFromIndex(dbPath, { partID: event.properties.partID })),
+    api.event.on("message.removed", (event) => removeFromIndex(dbPath, { messageID: event.properties.messageID })),
+    api.event.on("session.deleted", (event) => removeFromIndex(dbPath, { sessionID: event.properties.sessionID })),
+  )
   const command = "opencode.telescope.sessions"
   const open = () => {
     debug.log("plugin:dialog:open:start")
@@ -41,6 +67,9 @@ const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
   })
 
   api.lifecycle.onDispose(() => {
+    if (indexTimer) clearTimeout(indexTimer)
+    for (const unregister of unregisterIndexEvents) unregister()
+    disposeWorkerService()
     unregisterKeymap()
   })
   debug.log("plugin:setup:done")

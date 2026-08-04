@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 
-export const SEARCH_INDEX_VERSION = "8"
+export const SEARCH_INDEX_VERSION = "9"
 export const DOCUMENT_EXTRACTOR_VERSION = "1"
 
 export function migrateSearchIndex(db: Database) {
@@ -41,6 +41,21 @@ export function migrateSearchIndex(db: Database) {
       part_type UNINDEXED,
       tool UNINDEXED,
       time_created UNINDEXED,
+      text,
+      tokenize='unicode61'
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS document_fts_scope USING fts5(
+      id UNINDEXED,
+      message_id UNINDEXED,
+      session_id UNINDEXED,
+      session_title,
+      directory UNINDEXED,
+      kind UNINDEXED,
+      role UNINDEXED,
+      part_type UNINDEXED,
+      tool UNINDEXED,
+      time_created UNINDEXED,
+      scope,
       text,
       tokenize='unicode61'
     );

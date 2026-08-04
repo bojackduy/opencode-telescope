@@ -114,7 +114,7 @@ const PreviewAssistantPart = (props: { part: ConversationPreviewPart; item: Sear
 )
 
 const PreviewReasoningPart = (props: { part: ConversationPreviewPart; syntax: SyntaxStyle; theme: TuiThemeCurrent }) => {
-  const summary = createMemo(() => reasoningSummary(props.part.text.replace("[REDACTED]", "").trim()))
+  const summary = createMemo(() => reasoningSummary(clippedText(props.part.text.replace("[REDACTED]", "").trim(), "", 16, 8000, 120).text))
   return (
     <Show when={summary().title || summary().body}>
       <box id={`text-${props.part.messageID}-${props.part.id}`} paddingLeft={3} marginTop={1} flexDirection="column" flexShrink={0}>
@@ -342,18 +342,19 @@ const TargetMarker = (props: { part: ConversationPreviewPart; item?: SearchResul
 )
 
 const HighlightedConversationText = (props: { part: ConversationPreviewPart; item: SearchResult; theme: TuiThemeCurrent }) => {
-  const match = createMemo(() => conversationMatch(props.part.text, props.part.target, props.item.match))
+  const view = createMemo(() => clippedText(props.part.text, props.item.match, 16, 8000, 120).text)
+  const match = createMemo(() => conversationMatch(view(), props.part.target, props.item.match))
   return (
     <Show when={match()} fallback={
       <text fg={props.item.isVectorMatch ? props.theme.textMuted : props.theme.text}>
-        {props.item.isVectorMatch ? `~ ${props.part.text}` : props.part.text}
+        {props.item.isVectorMatch ? `~ ${view()}` : view()}
       </text>
     }>
       {(hit) => (
         <text fg={props.theme.text}>
-          <span>{props.part.text.slice(0, hit().start)}</span>
-          <span style={{ fg: props.theme.warning, bold: true }}>{props.part.text.slice(hit().start, hit().end)}</span>
-          <span>{props.part.text.slice(hit().end)}</span>
+          <span>{view().slice(0, hit().start)}</span>
+          <span style={{ fg: props.theme.warning, bold: true }}>{view().slice(hit().start, hit().end)}</span>
+          <span>{view().slice(hit().end)}</span>
         </text>
       )}
     </Show>
@@ -398,9 +399,10 @@ function searchResultPreviewPart(item: SearchResult): ConversationPreviewPart {
 }
 
 function conversationMarkdown(part: ConversationPreviewPart, item: SearchResult) {
-  const hit = conversationMatch(part.text, part.target, item.match)
-  if (!hit || !item.previewHighlight) return part.text
-  return markdownWithMatch(part.text.slice(0, hit.start), part.text.slice(hit.start, hit.end), part.text.slice(hit.end), true)
+  const text = clippedText(part.text, item.match, 16, 8000, 120).text
+  const hit = conversationMatch(text, part.target, item.match)
+  if (!hit || !item.previewHighlight) return text
+  return markdownWithMatch(text.slice(0, hit.start), text.slice(hit.start, hit.end), text.slice(hit.end), true)
 }
 
 function patchTitle(file: { type: string; relativePath: string; filePath: string; deletions: number }) {

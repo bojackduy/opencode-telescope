@@ -6,15 +6,10 @@ import { For, Show, batch as solidBatch, createEffect, createMemo, createSignal,
 import { ConversationPreview, PreviewHeader } from "./components/preview.tsx"
 import { EmptyState, ResultRow, SkeletonRow } from "./components/result-list.tsx"
 import {
-  loadConversationAfter,
-  loadConversationBefore,
   parseSearchQuery,
   parseSemanticConfig,
-  performSearch,
-  recentSessionMessages,
   resolveDatabasePath,
   searchQueryHint,
-  searchSessionMessages,
   type ConversationPreviewPart,
   type KeywordIndexState,
   type SearchResult,
@@ -26,6 +21,7 @@ import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
 import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { isIndexSyncActive, previewInWorker, requestIndexSync, searchInWorker, subscribeIndexEvents } from "./worker-service.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
   debug.log("component:render:start")
@@ -39,7 +35,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const [resultBaseOffset, setResultBaseOffset] = createSignal(0)
   const [nextResultOffset, setNextResultOffset] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
-  const [error, setError] = createSignal("")
   const [searchMode, setSearchMode] = createSignal<"keyword" | "hybrid">("keyword")
   const [keywordIndexState, setKeywordIndexState] = createSignal<KeywordIndexState>("missing")
   const [vectorState, setVectorState] = createSignal<VectorState | undefined>()
@@ -61,13 +56,12 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const MIN_RECENT_BATCH_SIZE = 15
   const RESULT_OVERSCAN_MULTIPLIER = 2
   const RESULT_BATCH_VIEWPORTS = 4
-  const RESULT_PREFETCH_VIEWPORTS = 5
+  const RESULT_PREFETCH_VIEWPORTS = 2
   const RESULT_CACHE_BEHIND_VIEWPORTS = 6
   const INITIAL_PREVIEW_BEFORE = 6
   const INITIAL_PREVIEW_AFTER = 10
   const PREVIEW_PAGE_SIZE = 20
-  const PREVIEW_PREFETCH_VIEWPORTS = 0.5
-  const PREVIEW_NAV_DEBOUNCE_MS = 40
+  const PREVIEW_NAV_DEBOUNCE_MS = 100
   let input: InputRenderable | undefined
   let resultScroll: ScrollBoxRenderable | undefined
   let previewScroll: ScrollBoxRenderable | undefined
@@ -111,16 +105,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let lastFiredSearchKey = ""
   let searchRequestId = 0
   let fallbackSearchRequestId: number | undefined
-  let searchWorker: Worker | undefined
   let sourceSearchWorker: Worker | undefined
-  let previewWorker: Worker | undefined
-  let indexWorker: Worker | undefined
-  let indexJobId = 0
-  const activeIndexJobs = new Set<string>()
   const SEARCH_DEBOUNCE_MS = 200
-  const SOURCE_FALLBACK_DELAY_MS = 1_000
   const SOURCE_FALLBACK_TIMEOUT_MS = 2_500
-  const SEARCH_WORKER_TIMEOUT_MS = 3000
+  const SEARCH_WORKER_TIMEOUT_MS = 5_000
   type SearchRequest = {
     id: number
     q: string
@@ -130,7 +118,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     limit: number
   }
   let pendingSearchRequest: SearchRequest | undefined
-  let sourceFallbackTimer: ReturnType<typeof setTimeout> | undefined
   let sourceFallbackWatchdogTimer: ReturnType<typeof setTimeout> | undefined
   let sourceFallbackRequestId: number | undefined
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
@@ -166,8 +153,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const cancelPreviewLoad = () => {
     if (previewLoadTimer) clearTimeout(previewLoadTimer)
     previewLoadTimer = undefined
-    previewWorker?.terminate()
-    previewWorker = undefined
   }
   const cancelPreviewPrefetch = () => {
     if (previewBeforeTimer) clearTimeout(previewBeforeTimer)
@@ -202,9 +187,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     searchWatchdogTimer = undefined
   }
   const cancelSourceFallback = () => {
-    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
     if (sourceFallbackWatchdogTimer) clearTimeout(sourceFallbackWatchdogTimer)
-    sourceFallbackTimer = undefined
     sourceFallbackWatchdogTimer = undefined
     sourceFallbackRequestId = undefined
     sourceSearchWorker?.terminate()
@@ -213,9 +196,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const commitSearchBatch = (request: SearchRequest, batch: SearchResult[], source: string) => {
     if (request.id !== searchRequestId) return
     clearSearchWatchdog()
-    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
     if (sourceFallbackWatchdogTimer) clearTimeout(sourceFallbackWatchdogTimer)
-    sourceFallbackTimer = undefined
     sourceFallbackWatchdogTimer = undefined
     sourceFallbackRequestId = undefined
     if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
@@ -233,42 +214,16 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoading(false)
     debug.timeEnd("query:search")
   }
-  const failSearch = (request: SearchRequest, error: string) => {
-    if (request.id !== searchRequestId) return
-    clearSearchWatchdog()
-    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
-    if (sourceFallbackWatchdogTimer) clearTimeout(sourceFallbackWatchdogTimer)
-    sourceFallbackTimer = undefined
-    sourceFallbackWatchdogTimer = undefined
-    sourceFallbackRequestId = undefined
-    if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
-    pendingSearchRequest = undefined
-    debug.log("bootstrap:search:error", error)
-    solidBatch(() => {
-      setResults([])
-      setResultBaseOffset(0)
-      setNextResultOffset(0)
-      setResultPageInfo({ loadedUntil: 0, hasMore: false, pageSize: request.limit, lastOffset: 0, lastAdded: 0 })
-    })
-    setError(error)
-    setBusy(false)
-    setLoading(false)
-    debug.timeEnd("query:search")
-  }
   const runSearchFallback = (request: SearchRequest, reason: string) => {
     if (request.id !== searchRequestId) return
     if (fallbackSearchRequestId === request.id) return
     fallbackSearchRequestId = request.id
     clearSearchWatchdog()
-    if (sourceFallbackTimer) clearTimeout(sourceFallbackTimer)
-    sourceFallbackTimer = undefined
     sourceFallbackRequestId = request.id
-    searchWorker?.terminate()
-    searchWorker = undefined
     setKeywordIndexState("indexing")
     debug.log("bootstrap:search:source-fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
     if (!ensureSourceSearchWorker()) {
-      requestIndexRebuild(request.db, "stale")
+      requestIndexRefresh(request.db, "stale")
       commitSearchBatch(request, [], "source-fallback-create-error")
       return
     }
@@ -286,17 +241,10 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       debug.log("source-worker:timeout", { id: request.id, ms: SOURCE_FALLBACK_TIMEOUT_MS })
       sourceSearchWorker?.terminate()
       sourceSearchWorker = undefined
-      requestIndexRebuild(request.db, "stale")
+      requestIndexRefresh(request.db, "stale")
       commitSearchBatch(request, [], "source-fallback-timeout")
     }, SOURCE_FALLBACK_TIMEOUT_MS)
     ;(sourceFallbackWatchdogTimer as { unref?: () => void }).unref?.()
-  }
-  const scheduleSourceFallback = (request: SearchRequest, reason: string) => {
-    if (sourceFallbackTimer || sourceFallbackRequestId === request.id) return
-    sourceFallbackTimer = setTimeout(() => {
-      sourceFallbackTimer = undefined
-      runSearchFallback(request, reason)
-    }, SOURCE_FALLBACK_DELAY_MS)
   }
   const ensureSourceSearchWorker = () => {
     if (sourceSearchWorker) return true
@@ -311,7 +259,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           setKeywordIndexState(msg.keywordState ?? "indexing")
           sourceSearchWorker?.terminate()
           sourceSearchWorker = undefined
-          requestIndexRebuild(request.db, "stale")
+          requestIndexRefresh(request.db, "stale")
           commitSearchBatch(request, msg.result, "source-fallback")
           return
         }
@@ -322,7 +270,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           debug.log("source-worker:query-error", msg.error)
           sourceSearchWorker?.terminate()
           sourceSearchWorker = undefined
-          requestIndexRebuild(request.db, "stale")
+          requestIndexRefresh(request.db, "stale")
           commitSearchBatch(request, [], "source-fallback-error")
         }
       }
@@ -332,7 +280,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         sourceSearchWorker?.terminate()
         sourceSearchWorker = undefined
         if (request && sourceFallbackRequestId === request.id) {
-          requestIndexRebuild(request.db, "stale")
+          requestIndexRefresh(request.db, "stale")
           commitSearchBatch(request, [], "source-fallback-worker-error")
         }
       }
@@ -343,95 +291,34 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       return false
     }
   }
-  const shouldRebuildIndex = (state: KeywordIndexState) => state === "missing" || state === "empty" || state === "stale" || state === "error"
-  const ensureIndexWorker = () => {
-    if (indexWorker) return true
-    try {
-      indexWorker = new Worker(new URL("./index-worker.ts", import.meta.url))
-      indexWorker.onmessage = (event: MessageEvent) => {
-        const msg = event.data
-        if (msg.type === "index-started") {
-          debug.log("index-worker:started", { dbPath: msg.dbPath })
-          setKeywordIndexState("indexing")
-          return
-        }
-        if (msg.type === "index-done") {
-          debug.log("index-worker:done", { dbPath: msg.dbPath })
-          activeIndexJobs.delete(msg.dbPath)
-          setKeywordIndexState("ready")
-          if (msg.dbPath === dbPath()) {
-            lastFiredSearchKey = ""
-            scheduleSearch(query().trim(), ownerRole(), dbPath(), directory)
-          }
-          return
-        }
-        if (msg.type === "index-error") {
-          debug.log("index-worker:error", { dbPath: msg.dbPath, error: msg.error })
-          activeIndexJobs.delete(msg.dbPath)
-          setKeywordIndexState("error")
-        }
-      }
-      indexWorker.onerror = (err) => {
-        debug.log("index-worker:error", err.message)
-        activeIndexJobs.clear()
-        setKeywordIndexState("error")
-        indexWorker?.terminate()
-        indexWorker = undefined
-      }
-      return true
-    } catch (err) {
-      debug.log("index-worker:create-error", err instanceof Error ? err.message : String(err))
-      setKeywordIndexState("error")
-      return false
+  const shouldSyncIndex = (state: KeywordIndexState) => state === "missing" || state === "empty" || state === "stale" || state === "error"
+  const requestIndexRefresh = (db: string, state: KeywordIndexState) => {
+    if (!shouldSyncIndex(state)) return
+    if (isIndexSyncActive(db)) return
+    requestIndexSync(db)
+  }
+  const unsubscribeIndexEvents = subscribeIndexEvents((event) => {
+    if (event.dbPath !== dbPath()) return
+    if (event.type === "index-removed") return
+    if (event.type === "index-remove-error") {
+      debug.log("index-worker:remove-error", { dbPath: event.dbPath, error: event.error })
+      return
     }
-  }
-  const requestIndexRebuild = (db: string, state: KeywordIndexState) => {
-    if (!shouldRebuildIndex(state)) return
-    if (activeIndexJobs.has(db)) return
-    if (!ensureIndexWorker()) return
-    activeIndexJobs.add(db)
-    setKeywordIndexState("indexing")
-    indexWorker!.postMessage({ type: "rebuild-index", id: ++indexJobId, dbPath: db })
-  }
-  const ensureSearchWorker = () => {
-    if (searchWorker) return true
-    try {
-      searchWorker = new Worker(new URL("./search-worker.ts", import.meta.url))
-      searchWorker.onmessage = (event: MessageEvent) => {
-        const msg = event.data
-        if (msg.type === "search-result") {
-          if (msg.id !== searchRequestId) return
-          const request = pendingSearchRequest
-          if (!request || request.id !== msg.id) return
-          setKeywordIndexState(msg.keywordState ?? "ready")
-          setVectorState(msg.vectorState)
-          if (msg.keywordState === "missing" || msg.keywordState === "empty" || msg.keywordState === "indexing") {
-            runSearchFallback(request, `sidecar:${msg.keywordState}`)
-            return
-          }
-          requestIndexRebuild(request.db, msg.keywordState ?? "ready")
-          commitSearchBatch(request, msg.result, "worker")
-        }
-        if (msg.type === "error") {
-          if (msg.id !== searchRequestId) return
-          const request = pendingSearchRequest
-          if (!request || request.id !== msg.id) return
-          runSearchFallback(request, `worker-message:${msg.error}`)
-        }
-      }
-      searchWorker.onerror = (err) => {
-        debug.log("worker:error", err.message)
-        const request = pendingSearchRequest
-        searchWorker?.terminate()
-        searchWorker = undefined
-        if (request) runSearchFallback(request, `worker-error:${err.message}`)
-      }
-      return true
-    } catch (err) {
-      debug.log("worker:create-error", err instanceof Error ? err.message : String(err))
-      return false
+    if (event.type === "index-started") {
+      debug.log("index-worker:started", { dbPath: event.dbPath })
+      setKeywordIndexState((state) => state === "missing" || state === "empty" ? "indexing" : "stale")
+      return
     }
-  }
+    if (event.type === "index-done") {
+      debug.log("index-worker:done", { dbPath: event.dbPath })
+      setKeywordIndexState("ready")
+      lastFiredSearchKey = ""
+      scheduleSearch(query().trim(), ownerRole(), dbPath(), directory)
+      return
+    }
+    debug.log("index-worker:error", { dbPath: event.dbPath, error: event.error })
+    setKeywordIndexState((state) => state === "missing" || state === "empty" || state === "indexing" ? "error" : "stale")
+  })
 
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
@@ -440,11 +327,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     cancelSourceFallback()
     cancelPreviewPrefetch()
     cancelPreviewLoad()
-    searchWorker?.terminate()
-    searchWorker = undefined
-    indexWorker?.terminate()
-    indexWorker = undefined
-    activeIndexJobs.clear()
+    unsubscribeIndexEvents()
   })
 
   const resultRowHeight = createMemo(() => leftWidth() >= 48 ? 3 : 4)
@@ -521,7 +404,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const executeSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
     lastFiredSearchKey = searchKey(q, role, db, dir)
     const limit = q ? Math.min(searchBatchSize(), 80) : recentBatchSize()
-    setError("")
     setHasMore(true)
     advanceSelectionAfterLoad = false
     advanceSelectionBeforeLoad = false
@@ -529,7 +411,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoadingMore(false)
     setLoadingPreviousResults(false)
     setPrefetchingResults(false)
-    setLoading(true)
+    setLoading(results().length === 0)
     if (q) setBusy(true)
     setSearchMode(detectSearchMode())
     debug.time("query:search")
@@ -538,27 +420,33 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     cancelSourceFallback()
     const request: SearchRequest = { id, q, role, db, dir, limit }
     pendingSearchRequest = request
-    if (activeIndexJobs.has(db) || keywordIndexState() === "indexing") {
-      runSearchFallback(request, "indexing-active")
-      return
-    }
-    if (!ensureSearchWorker()) {
-      runSearchFallback(request, "worker-create-failed")
-      return
-    }
-    const msg = q
-      ? { type: "search" as const, id, query: q, limit, offset: 0, directory: dir, role, dbPath: db }
-      : { type: "recent" as const, id, limit, offset: 0, directory: dir, role, dbPath: db }
     debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)", worker: true })
     clearSearchWatchdog()
     searchWatchdogTimer = setTimeout(() => {
       if (request.id !== searchRequestId) return
       debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
-      runSearchFallback(request, "worker-timeout")
+      if (keywordIndexState() === "missing" || keywordIndexState() === "empty" || keywordIndexState() === "indexing") {
+        runSearchFallback(request, "worker-timeout-no-index")
+      }
     }, SEARCH_WORKER_TIMEOUT_MS)
     ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
-    scheduleSourceFallback(request, "sidecar-slow")
-    searchWorker!.postMessage(msg)
+    void searchInWorker({ query: q, limit, offset: 0, directory: dir, role, dbPath: db })
+      .then((response) => {
+        if (request.id !== searchRequestId) return
+        setKeywordIndexState(response.keywordState)
+        setVectorState(response.vectorState)
+        if (response.results.length === 0 && (response.keywordState === "missing" || response.keywordState === "empty" || response.keywordState === "indexing")) {
+          runSearchFallback(request, `sidecar:${response.keywordState}`)
+          return
+        }
+        requestIndexRefresh(request.db, response.keywordState)
+        commitSearchBatch(request, response.results, "worker")
+      })
+      .catch((err) => {
+        if (request.id !== searchRequestId) return
+        debug.log("worker:error", err instanceof Error ? err.message : String(err))
+        runSearchFallback(request, "worker-error")
+      })
   }
 
   const scheduleSearch = (q: string, role: SearchRole | undefined, db: string, dir: string) => {
@@ -600,9 +488,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     advance ? setLoadingMore(true) : setPrefetchingResults(true)
     debug.time("query:load-more")
     try {
-      const batch = q
-        ? await performSearch(q, { limit, offset, dbPath: db, directory: dir, role })
-        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
+      const batch = (await searchInWorker({ query: q, limit, offset, dbPath: db, directory: dir, role })).results
       const nextHasMore = batch.length >= limit
       const nextLoadedUntil = offset + batch.length
       const previousSelected = selected()
@@ -660,9 +546,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoadingPreviousResults(true)
     debug.time("query:load-before")
     try {
-      const batch = q
-        ? await performSearch(q, { limit, offset, dbPath: db, directory: dir, role })
-        : recentSessionMessages({ limit, offset, dbPath: db, directory: dir, role })
+      const batch = (await searchInWorker({ query: q, limit, offset, dbPath: db, directory: dir, role })).results
       const nextSelected = advanceSelectionBeforeLoad && batch.length > 0 ? base - 1 : selected()
       debug.log("results:load-before", { offset, limit, added: batch.length, fromBase: base, toBase: offset, cached: results().length + batch.length, advance })
       const shouldAdvance = advanceSelectionBeforeLoad
@@ -768,31 +652,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     const timer = setTimeout(() => scheduleResultPrefetch(false), 100)
     onCleanup(() => clearTimeout(timer))
-  })
-
-  createEffect(() => {
-    if (!resultNavigationStarted || !hasMore()) return
-    const interval = setInterval(() => {
-      if (!hasMore() || loadingMore() || loadingPreviousResults() || prefetchingResults() || busy() || loading()) return
-      const scroll = resultScroll
-      if (!scroll) return
-      const children = scroll.getChildren()
-      if (!children || children.length === 0) return
-      const lastChild = children[children.length - 1] as { y: number; height: number }
-      const contentHeight = lastChild.y + lastChild.height
-      const scrollThreshold = Math.max(2, Math.floor(scroll.height * RESULT_PREFETCH_VIEWPORTS))
-      if (scroll.scrollTop + scroll.height >= contentHeight - scrollThreshold) {
-        debug.log("results:scroll-prefetch", {
-          scrollTop: scroll.scrollTop,
-          height: scroll.height,
-          contentHeight,
-          scrollThreshold,
-          rowsAhead: resultPrefetchState().rowsAhead,
-        })
-        scheduleResultPrefetch(false)
-      }
-    }, 200)
-    onCleanup(() => clearInterval(interval))
   })
 
   const estimatePreviewPartHeight = (part: ConversationPreviewPart) => {
@@ -974,7 +833,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     onCleanup(() => clearTimeout(timer))
   })
 
-  const loadPreviewBefore = (pending: PendingPreviewBefore) => {
+  const loadPreviewBefore = async (pending: PendingPreviewBefore) => {
     if (!isCurrentPreviewGeneration(pending.generation, pending.itemID, "preview:load-before:start")) return
     const item = selectedResult()
     const first = previewParts()[0]
@@ -1008,7 +867,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         visibleLoad: pending.visibleLoad,
         state: beforeState,
       })
-      const page = loadConversationBefore(item, { id: first.id, timeCreated: first.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      const page = await previewInWorker({
+        operation: "before",
+        result: item,
+        cursor: { id: first.id, timeCreated: first.timeCreated },
+        limit: PREVIEW_PAGE_SIZE,
+        dbPath: dbPath(),
+      })
+      if (!isCurrentPreviewGeneration(pending.generation, pending.itemID, "preview:load-before:result")) return
       debug.log("preview:load-before:query-done", {
         loadID: pending.id,
         added: page.parts.length,
@@ -1109,12 +975,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       previewBeforeAdjusting = false
     } finally {
       debug.timeEnd("preview:load-before")
-      lastBeforeLoadMs = Date.now()
       pending.visibleLoad ? setLoadingPreviewMore(false) : setPrefetchingPreviewBefore(false)
     }
   }
 
-  const loadPreviewAfter = (visibleLoad = false, generation = previewGeneration, itemID = selectedResult()?.id) => {
+  const loadPreviewAfter = async (visibleLoad = false, generation = previewGeneration, itemID = selectedResult()?.id) => {
     if (!isCurrentPreviewGeneration(generation, itemID, "preview:load-after:start")) return
     const item = selectedResult()
     const last = previewParts().at(-1)
@@ -1135,7 +1000,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     visibleLoad ? setLoadingPreviewMore(true) : setPrefetchingPreviewAfter(true)
     debug.time("preview:load-after")
     try {
-      const page = loadConversationAfter(item, { id: last.id, timeCreated: last.timeCreated }, { limit: PREVIEW_PAGE_SIZE, dbPath: dbPath() })
+      const page = await previewInWorker({
+        operation: "after",
+        result: item,
+        cursor: { id: last.id, timeCreated: last.timeCreated },
+        limit: PREVIEW_PAGE_SIZE,
+        dbPath: dbPath(),
+      })
+      if (!isCurrentPreviewGeneration(generation, itemID, "preview:load-after:result")) return
       debug.log("preview:load-after", {
         item: item.id,
         added: page.parts.length,
@@ -1408,20 +1280,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     previewLoadTimer = setTimeout(() => {
       previewLoadTimer = undefined
       if (!isCurrentPreviewGeneration(generation, item.id, "preview:worker:start")) return
-      try {
-        previewWorker = new Worker(new URL("./preview-worker.ts", import.meta.url))
-        previewWorker.onmessage = (event: MessageEvent) => {
-          const msg = event.data
-          if (msg.id !== requestId || msg.itemID !== item.id || !isCurrentPreviewGeneration(generation, item.id, "preview:worker:result")) return
-          previewWorker?.terminate()
-          previewWorker = undefined
-          if (msg.type === "preview-error") {
-            debug.log("preview:worker:error", msg.error)
-            debug.timeEnd("nav:total")
-            debug.timeEnd("preview:load")
-            return
-          }
-          const page = msg.page
+      void previewInWorker({
+        operation: "around",
+        result: item,
+        before: INITIAL_PREVIEW_BEFORE,
+        after: INITIAL_PREVIEW_AFTER,
+        dbPath: db,
+      }).then((page) => {
+          if (requestId !== previewLoadRequestId || !isCurrentPreviewGeneration(generation, item.id, "preview:worker:result")) return
           debug.log("preview:init", {
             item: item.id,
             session: item.sessionID,
@@ -1442,75 +1308,17 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           }, 1)
           debug.timeEnd("nav:total")
           debug.timeEnd("preview:load")
-        }
-        previewWorker.onerror = (err) => {
+        })
+        .catch((err) => {
           if (!isCurrentPreviewGeneration(generation, item.id, "preview:worker:onerror")) return
-          debug.log("preview:worker:error", err.message)
-          previewWorker?.terminate()
-          previewWorker = undefined
+          debug.log("preview:worker:error", err instanceof Error ? err.message : String(err))
           debug.timeEnd("nav:total")
           debug.timeEnd("preview:load")
-        }
-        previewWorker.postMessage({
-          type: "preview-around",
-          id: requestId,
-          result: item,
-          before: INITIAL_PREVIEW_BEFORE,
-          after: INITIAL_PREVIEW_AFTER,
-          dbPath: db,
         })
-      } catch (err) {
-        previewWorker = undefined
-        debug.log("preview:worker:create-error", err instanceof Error ? err.message : String(err))
-        debug.timeEnd("nav:total")
-        debug.timeEnd("preview:load")
-      }
     }, PREVIEW_NAV_DEBOUNCE_MS)
   })
 
-  let lastBeforeLoadMs = 0
   let lastPreviewScrollKeyMs = 0
-  createEffect(() => {
-    const item = selectedResult()
-    if (!item) return
-    const interval = setInterval(() => {
-      if (loadingPreviewMore() || prefetchingPreviewBefore() || prefetchingPreviewAfter()) return
-      if (previewBeforeAdjusting) return
-      const scroll = previewScroll
-      const children = scroll?.getChildren()
-      if (!scroll || !children || children.length === 0) return
-      const totalContentHeight = previewContentHeight()
-      const atTop = scroll.scrollTop <= 0
-      const prefetchDistance = Math.max(2, Math.floor(scroll.height * PREVIEW_PREFETCH_VIEWPORTS))
-      const nearTop = scroll.scrollTop <= prefetchDistance
-      const atBottom = scroll.scrollTop + scroll.height >= totalContentHeight - 1
-      const nearBottom = scroll.scrollTop + scroll.height >= totalContentHeight - prefetchDistance
-      const msSinceManualScroll = Date.now() - lastPreviewScrollKeyMs
-      const willLoadBefore = atTop && hasMorePreviewBefore() && (Date.now() - lastBeforeLoadMs) > 100 && msSinceManualScroll > 700
-      debug.log("preview:edge:decision", {
-        scrollTop: scroll.scrollTop,
-        height: scroll.height,
-        contentHeight: totalContentHeight,
-        prefetchDistance,
-        atTop,
-        nearTop,
-        atBottom,
-        nearBottom,
-        hasMoreBefore: hasMorePreviewBefore(),
-        hasMoreAfter: hasMorePreviewAfter(),
-        loadingBefore: loadingPreviewMore(),
-        pendingBefore: Boolean(previewBeforeTimer),
-        willLoadBefore,
-        msSinceLastLoad: Date.now() - lastBeforeLoadMs,
-        msSinceManualScroll,
-      })
-      if (willLoadBefore) {
-        schedulePreviewBefore({ intent: "passive-prefetch", previousContentHeight: totalContentHeight, previousScrollTop: scroll.scrollTop })
-      }
-      if (nearBottom && hasMorePreviewAfter()) schedulePreviewAfter(atBottom)
-    }, 400)
-    onCleanup(() => clearInterval(interval))
-  })
 
   const open = () => {
     const item = selectedResult()
@@ -1673,16 +1481,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             <box flexDirection="row" flexGrow={1} minHeight={0}>
               <box width={leftWidth()} flexDirection="column" minHeight={0} backgroundColor={theme().backgroundPanel}>
                 <scrollbox ref={(element: ScrollBoxRenderable) => (resultScroll = element)} flexGrow={1} minHeight={0} verticalScrollbarOptions={{ visible: true }}>
-                  <Show
-                    when={!error()}
-                    fallback={
-                      <box flexDirection="column" paddingLeft={1} paddingTop={1}>
-                        <text fg={theme().error}>database search failed</text>
-                        <text fg={theme().textMuted}>{error()}</text>
-                      </box>
-                    }
-                  >
-                    <Show when={!loading()}>
+                  <Show when={!loading()}>
                       <Show when={results().length > 0} fallback={<EmptyState query={query()} owner={ownerStatusLabel()} theme={theme()} keywordIndexState={keywordIndexState()} />}>
                         <box height={resultTopSpacerHeight()} flexShrink={0} />
                         <For each={resultRenderWindow().items}>
@@ -1709,15 +1508,14 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
                           <text fg={theme().textMuted}>  no more results</text>
                         </Show>
                       </Show>
-                    </Show>
-                    <Show when={loading()}>
-                      <SkeletonRow theme={theme()} />
-                      <SkeletonRow theme={theme()} />
-                      <SkeletonRow theme={theme()} />
-                      <SkeletonRow theme={theme()} />
-                      <SkeletonRow theme={theme()} />
-                      <SkeletonRow theme={theme()} />
-                    </Show>
+                  </Show>
+                  <Show when={loading()}>
+                    <SkeletonRow theme={theme()} />
+                    <SkeletonRow theme={theme()} />
+                    <SkeletonRow theme={theme()} />
+                    <SkeletonRow theme={theme()} />
+                    <SkeletonRow theme={theme()} />
+                    <SkeletonRow theme={theme()} />
                   </Show>
                 </scrollbox>
               </box>
