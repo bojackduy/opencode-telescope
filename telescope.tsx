@@ -411,7 +411,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setLoadingMore(false)
     setLoadingPreviousResults(false)
     setPrefetchingResults(false)
-    setLoading(results().length === 0)
+    setLoading(true)
     if (q) setBusy(true)
     setSearchMode(detectSearchMode())
     debug.time("query:search")
@@ -430,7 +430,32 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       }
     }, SEARCH_WORKER_TIMEOUT_MS)
     ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
-    void searchInWorker({ query: q, limit, offset: 0, directory: dir, role, dbPath: db })
+    let streamFirstBatch = true
+    void searchInWorker({ query: q, limit, offset: 0, directory: dir, role, dbPath: db }, {
+      onStreamBatch: (results, _bucketLabel, _isComplete) => {
+        if (request.id !== searchRequestId) return
+        if (streamFirstBatch) {
+          streamFirstBatch = false
+          solidBatch(() => {
+            setResults(results)
+            setResultBaseOffset(0)
+            setNextResultOffset(results.length)
+            setHasMore(results.length >= limit)
+            setResultPageInfo({ loadedUntil: results.length, hasMore: results.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: results.length })
+            setSelected(0)
+          })
+          setBusy(false)
+          setLoading(false)
+        } else {
+          solidBatch(() => {
+            setResults(results)
+            setNextResultOffset(results.length)
+            setHasMore(results.length >= limit)
+            setResultPageInfo({ loadedUntil: results.length, hasMore: results.length >= limit, pageSize: limit, lastOffset: 0, lastAdded: results.length })
+          })
+        }
+      },
+    })
       .then((response) => {
         if (request.id !== searchRequestId) return
         setKeywordIndexState(response.keywordState)

@@ -25,17 +25,25 @@ let searchWorker: Worker | undefined
 let previewWorker: Worker | undefined
 let indexWorker: Worker | undefined
 let requestID = 0
-const searchRequests = new Map<number, { resolve: (value: SearchResponse) => void; reject: (error: Error) => void }>()
-const previewRequests = new Map<number, { resolve: (value: ConversationPreviewPage) => void; reject: (error: Error) => void }>()
+type SearchRequest = { resolve: (value: SearchResponse) => void; reject: (error: Error) => void; streamID: number; accumulation: SearchResult[] }
+const searchRequests = new Map<number, SearchRequest>()
+type PreviewRequest = { resolve: (value: ConversationPreviewPage) => void; reject: (error: Error) => void }
+const previewRequests = new Map<number, PreviewRequest>()
 const indexListeners = new Set<(event: IndexEvent) => void>()
 const activeIndexJobs = new Set<string>()
 const pendingIndexJobs = new Set<string>()
+const streamCallbacks = new Map<number, (results: SearchResult[], bucketLabel: string, isComplete: boolean) => void>()
 
-export function searchInWorker(input: SearchInput): Promise<SearchResponse> {
+export function searchInWorker(
+  input: SearchInput,
+  opts?: { onStreamBatch?: (results: SearchResult[], bucketLabel: string, isComplete: boolean) => void },
+): Promise<SearchResponse> {
   const worker = ensureSearchWorker()
   const id = ++requestID
+  const streamID = ++requestID
+  if (opts?.onStreamBatch) streamCallbacks.set(streamID, opts.onStreamBatch)
   return new Promise((resolve, reject) => {
-    searchRequests.set(id, { resolve, reject })
+    searchRequests.set(id, { resolve, reject, streamID, accumulation: [] })
     worker.postMessage({
       type: input.query ? "search" : "recent",
       id,
@@ -90,6 +98,7 @@ export function disposeWorkerService() {
   for (const request of previewRequests.values()) request.reject(error)
   searchRequests.clear()
   previewRequests.clear()
+  streamCallbacks.clear()
   activeIndexJobs.clear()
   pendingIndexJobs.clear()
   indexListeners.clear()
@@ -106,13 +115,26 @@ function ensureSearchWorker() {
   searchWorker = new Worker(new URL("./search-worker.ts", import.meta.url))
   searchWorker.onmessage = (event: MessageEvent) => {
     const msg = event.data
+    if (msg.type === "stream-batch") {
+      const request = searchRequests.get(msg.id)
+      if (!request) return
+      const cb = streamCallbacks.get(request.streamID)
+      if (cb) {
+        request.accumulation = [...request.accumulation, ...msg.results]
+        const total = request.accumulation.length
+        cb(request.accumulation, msg.bucketLabel, msg.isComplete)
+      }
+      return
+    }
     const request = searchRequests.get(msg.id)
     if (!request) return
-    searchRequests.delete(msg.id)
+    streamCallbacks.delete(request.streamID)
     if (msg.type === "error") {
+      searchRequests.delete(msg.id)
       request.reject(new Error(msg.error))
       return
     }
+    searchRequests.delete(msg.id)
     request.resolve({
       results: msg.result,
       keywordState: msg.keywordState,
