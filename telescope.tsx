@@ -101,14 +101,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let resultPrefetchTimer: ReturnType<typeof setTimeout> | undefined
   let resultPreviousTimer: ReturnType<typeof setTimeout> | undefined
   let searchTimer: ReturnType<typeof setTimeout> | undefined
-  let searchWatchdogTimer: ReturnType<typeof setTimeout> | undefined
   let lastFiredSearchKey = ""
   let searchRequestId = 0
-  let fallbackSearchRequestId: number | undefined
-  let sourceSearchWorker: Worker | undefined
   const SEARCH_DEBOUNCE_MS = 200
-  const SOURCE_FALLBACK_TIMEOUT_MS = 2_500
-  const SEARCH_WORKER_TIMEOUT_MS = 5_000
   type SearchRequest = {
     id: number
     q: string
@@ -118,8 +113,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     limit: number
   }
   let pendingSearchRequest: SearchRequest | undefined
-  let sourceFallbackWatchdogTimer: ReturnType<typeof setTimeout> | undefined
-  let sourceFallbackRequestId: number | undefined
   type PreviewBeforeIntent = "passive-prefetch" | "explicit-scroll"
   type PendingPreviewBefore = {
     id: number
@@ -182,24 +175,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }
     return current
   }
-  const clearSearchWatchdog = () => {
-    if (searchWatchdogTimer) clearTimeout(searchWatchdogTimer)
-    searchWatchdogTimer = undefined
-  }
-  const cancelSourceFallback = () => {
-    if (sourceFallbackWatchdogTimer) clearTimeout(sourceFallbackWatchdogTimer)
-    sourceFallbackWatchdogTimer = undefined
-    sourceFallbackRequestId = undefined
-    sourceSearchWorker?.terminate()
-    sourceSearchWorker = undefined
-  }
   const commitSearchBatch = (request: SearchRequest, batch: SearchResult[], source: string) => {
     if (request.id !== searchRequestId) return
-    clearSearchWatchdog()
-    if (sourceFallbackWatchdogTimer) clearTimeout(sourceFallbackWatchdogTimer)
-    sourceFallbackWatchdogTimer = undefined
-    sourceFallbackRequestId = undefined
-    if (fallbackSearchRequestId === request.id) fallbackSearchRequestId = undefined
     pendingSearchRequest = undefined
     debug.log("bootstrap:search:done", { rows: batch.length, limit: request.limit, mode: searchMode(), source })
     solidBatch(() => {
@@ -213,83 +190,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setBusy(false)
     setLoading(false)
     debug.timeEnd("query:search")
-  }
-  const runSearchFallback = (request: SearchRequest, reason: string) => {
-    if (request.id !== searchRequestId) return
-    if (fallbackSearchRequestId === request.id) return
-    fallbackSearchRequestId = request.id
-    clearSearchWatchdog()
-    sourceFallbackRequestId = request.id
-    setKeywordIndexState("indexing")
-    debug.log("bootstrap:search:source-fallback", { reason, query: request.q || "(all recent)", limit: request.limit })
-    if (!ensureSourceSearchWorker()) {
-      requestIndexRefresh(request.db, "stale")
-      commitSearchBatch(request, [], "source-fallback-create-error")
-      return
-    }
-    sourceSearchWorker!.postMessage({
-      type: "source-search",
-      id: request.id,
-      query: request.q,
-      limit: request.limit,
-      directory: request.dir,
-      role: request.role,
-      dbPath: request.db,
-    })
-    sourceFallbackWatchdogTimer = setTimeout(() => {
-      if (request.id !== searchRequestId || sourceFallbackRequestId !== request.id) return
-      debug.log("source-worker:timeout", { id: request.id, ms: SOURCE_FALLBACK_TIMEOUT_MS })
-      sourceSearchWorker?.terminate()
-      sourceSearchWorker = undefined
-      requestIndexRefresh(request.db, "stale")
-      commitSearchBatch(request, [], "source-fallback-timeout")
-    }, SOURCE_FALLBACK_TIMEOUT_MS)
-    ;(sourceFallbackWatchdogTimer as { unref?: () => void }).unref?.()
-  }
-  const ensureSourceSearchWorker = () => {
-    if (sourceSearchWorker) return true
-    try {
-      sourceSearchWorker = new Worker(new URL("./source-search-worker.ts", import.meta.url))
-      sourceSearchWorker.onmessage = (event: MessageEvent) => {
-        const msg = event.data
-        if (msg.type === "source-result") {
-          if (msg.id !== searchRequestId || sourceFallbackRequestId !== msg.id) return
-          const request = pendingSearchRequest
-          if (!request || request.id !== msg.id) return
-          setKeywordIndexState(msg.keywordState ?? "indexing")
-          sourceSearchWorker?.terminate()
-          sourceSearchWorker = undefined
-          requestIndexRefresh(request.db, "stale")
-          commitSearchBatch(request, msg.result, "source-fallback")
-          return
-        }
-        if (msg.type === "source-error") {
-          if (msg.id !== searchRequestId || sourceFallbackRequestId !== msg.id) return
-          const request = pendingSearchRequest
-          if (!request || request.id !== msg.id) return
-          debug.log("source-worker:query-error", msg.error)
-          sourceSearchWorker?.terminate()
-          sourceSearchWorker = undefined
-          requestIndexRefresh(request.db, "stale")
-          commitSearchBatch(request, [], "source-fallback-error")
-        }
-      }
-      sourceSearchWorker.onerror = (err) => {
-        debug.log("source-worker:error", err.message)
-        const request = pendingSearchRequest
-        sourceSearchWorker?.terminate()
-        sourceSearchWorker = undefined
-        if (request && sourceFallbackRequestId === request.id) {
-          requestIndexRefresh(request.db, "stale")
-          commitSearchBatch(request, [], "source-fallback-worker-error")
-        }
-      }
-      return true
-    } catch (err) {
-      debug.log("source-worker:create-error", err instanceof Error ? err.message : String(err))
-      sourceSearchWorker = undefined
-      return false
-    }
   }
   const shouldSyncIndex = (state: KeywordIndexState) => state === "missing" || state === "empty" || state === "stale" || state === "error"
   const requestIndexRefresh = (db: string, state: KeywordIndexState) => {
@@ -323,8 +223,6 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   onCleanup(() => {
     if (resultPrefetchTimer) clearTimeout(resultPrefetchTimer)
     if (resultPreviousTimer) clearTimeout(resultPreviousTimer)
-    clearSearchWatchdog()
-    cancelSourceFallback()
     cancelPreviewPrefetch()
     cancelPreviewLoad()
     unsubscribeIndexEvents()
@@ -416,20 +314,9 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     setSearchMode(detectSearchMode())
     debug.time("query:search")
     const id = ++searchRequestId
-    fallbackSearchRequestId = undefined
-    cancelSourceFallback()
     const request: SearchRequest = { id, q, role, db, dir, limit }
     pendingSearchRequest = request
     debug.log("bootstrap:search:start", { limit, directory: dir, role, query: q || "(all recent)", worker: true })
-    clearSearchWatchdog()
-    searchWatchdogTimer = setTimeout(() => {
-      if (request.id !== searchRequestId) return
-      debug.log("worker:timeout", { id: request.id, ms: SEARCH_WORKER_TIMEOUT_MS })
-      if (keywordIndexState() === "missing" || keywordIndexState() === "empty" || keywordIndexState() === "indexing") {
-        runSearchFallback(request, "worker-timeout-no-index")
-      }
-    }, SEARCH_WORKER_TIMEOUT_MS)
-    ;(searchWatchdogTimer as { unref?: () => void }).unref?.()
     let streamFirstBatch = true
     void searchInWorker({ query: q, limit, offset: 0, directory: dir, role, dbPath: db }, {
       onStreamBatch: (results, _bucketLabel, _isComplete) => {
@@ -460,17 +347,13 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         if (request.id !== searchRequestId) return
         setKeywordIndexState(response.keywordState)
         setVectorState(response.vectorState)
-        if (response.results.length === 0 && (response.keywordState === "missing" || response.keywordState === "empty" || response.keywordState === "indexing")) {
-          runSearchFallback(request, `sidecar:${response.keywordState}`)
-          return
-        }
         requestIndexRefresh(request.db, response.keywordState)
         commitSearchBatch(request, response.results, "worker")
       })
       .catch((err) => {
         if (request.id !== searchRequestId) return
         debug.log("worker:error", err instanceof Error ? err.message : String(err))
-        runSearchFallback(request, "worker-error")
+        commitSearchBatch(request, results(), "worker-error")
       })
   }
 

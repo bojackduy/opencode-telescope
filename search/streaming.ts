@@ -38,11 +38,6 @@ export function* streamSearchBuckets(
   const term = queryString.trim()
   const limit = options.limit ?? 80
 
-  if (!term && !options.directory && !options.role) {
-    yield { results: [], bucketLabel: "empty", bucketIndex: 0, totalBuckets: 0, isComplete: true }
-    return
-  }
-
   const resolvedPath = dbPath || resolveDatabasePath()
   let db: Database | undefined
   try {
@@ -81,7 +76,7 @@ export function* streamSearchBuckets(
     return
   }
 
-  const effectiveBuckets = term ? STREAM_BUCKETS : [{ label: "recent", cutoffMs: STREAM_BUCKETS.at(-1)!.cutoffMs, sessions: 16 }]
+  const effectiveBuckets = term ? STREAM_BUCKETS : [{ label: "recent", cutoffMs: 0, sessions: 16 }]
   const totalBuckets = effectiveBuckets.length
 
   const globalSeen = new Set<string>()
@@ -92,8 +87,7 @@ export function* streamSearchBuckets(
     const bucket = effectiveBuckets[bucketIndex]!
     const bucketResults: SearchResult[] = []
 
-    const cutoffMs = Math.max(0, now - bucket.cutoffMs)
-    const nextCutoffMs = bucketIndex > 0 ? now - effectiveBuckets[bucketIndex - 1]!.cutoffMs : Infinity
+    const cutoffMs = bucket.cutoffMs === 0 ? 0 : Math.max(0, now - bucket.cutoffMs)
     const bucketSessions = sessions.slice(0, bucket.sessions)
     const startTime = performance.now()
 
@@ -101,12 +95,8 @@ export function* streamSearchBuckets(
       if (bucketResults.length >= MAX_CANDIDATES) break
 
       // Single joined query: messages + their parts in one round-trip per session
-      const isLastBucket = bucketIndex === effectiveBuckets.length - 1
-      const timeFilter = isLastBucket
-        ? "AND m.time_created >= ?"
-        : "AND m.time_created >= ? AND m.time_created < ?"
+      const timeFilter = "AND m.time_created >= ?"
       const timeParams: (string | number)[] = [session.id, cutoffMs]
-      if (!isLastBucket) timeParams.push(nextCutoffMs)
       timeParams.push(MAX_MESSAGES_PER_SESSION * MAX_PARTS_PER_MESSAGE)
 
       const rows = db.query<{
@@ -196,6 +186,7 @@ function streamMatchResult(
   for (const clause of query.clauses) {
     if (clause.kind && row.kind !== clause.kind) continue
     if (clause.tool && row.tool !== clause.tool) continue
+    if (!clause.kind && !clause.tool && row.kind !== "user" && row.kind !== "assistant") continue
     const result = rowToSearchResult(row as any, clause.term)
     if (result) return result
   }

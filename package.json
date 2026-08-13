@@ -55,7 +55,7 @@
     "telescope.tsx",
     "search.ts",
     "search-worker.ts",
-    "source-search-worker.ts",
+    "streaming-worker.ts",
     "preview-worker.ts",
     "worker-service.ts",
     "index-worker.ts",
