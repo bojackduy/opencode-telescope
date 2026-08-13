@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { findRenderableByID, jumpTargetIDs, messageTargetID, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
+import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, messageTargetID, openCodeJumpTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
 import type { ConversationPreviewPart, SearchResult } from "../search.ts"
 
 describe("render-target utils", () => {
@@ -53,6 +53,23 @@ describe("render-target utils", () => {
       "msg_1",
       "msg_2",
     ])
+  })
+
+  test("openCodeJumpTarget uses the rendered user prompt for assistant results", () => {
+    expect(openCodeJumpTarget("msg_assistant", ["fallback"], [
+      { id: "msg_user", role: "user" },
+      { id: "msg_assistant", role: "assistant", parentID: "msg_user" },
+    ])).toEqual({ available: true, targetIDs: ["msg_user"] })
+  })
+
+  test("openCodeJumpTarget detects messages outside OpenCode's rendered window", () => {
+    expect(openCodeJumpTarget("msg_old", ["fallback"], [
+      { id: "msg_recent", role: "user" },
+    ])).toEqual({ available: false, targetIDs: ["fallback"] })
+
+    expect(openCodeJumpTarget("msg_assistant", ["fallback"], [
+      { id: "msg_assistant", role: "assistant", parentID: "msg_old_user" },
+    ])).toEqual({ available: false, targetIDs: ["fallback"] })
   })
 
   test("previewScrollAmount returns minimum of 1", () => {
@@ -127,6 +144,50 @@ describe("render-target utils", () => {
 
     expect(scrollPreviewToTarget(scroll as never, "missing")).toBe(false)
   })
+
+  test("jumpToRenderedTarget waits for a cross-session render and uses current targets", async () => {
+    let ready = false
+    let scrolledBy = 0
+    let targetIDs = ["old-target"]
+    let root: unknown = renderNode("old-root")
+
+    setTimeout(() => {
+      ready = true
+      targetIDs = ["target"]
+      root = renderNode("root", [
+        {
+          ...renderNode("scroll", [renderNode("target", [], 12)], 2),
+          scrollBy(amount: number) {
+            scrolledBy = amount
+          },
+        },
+      ])
+    }, 5)
+
+    const result = await jumpToRenderedTarget(() => root, () => targetIDs, {
+      ready: () => ready,
+      interval: 1,
+      timeout: 1,
+    })
+
+    expect(result).toEqual({ status: "found", targetID: "target" })
+    expect(scrolledBy).toBe(9)
+  })
+
+  test("jumpToRenderedTarget reports a loaded but missing target", async () => {
+    const result = await jumpToRenderedTarget(renderNode("root"), "missing", { interval: 1, timeout: 5 })
+    expect(result).toEqual({ status: "missing" })
+  })
+
+  test("jumpToRenderedTarget stops when OpenCode did not load the target", async () => {
+    const result = await jumpToRenderedTarget(renderNode("root"), "missing", {
+      ready: () => false,
+      unavailable: () => true,
+      interval: 1,
+      timeout: 100,
+    })
+    expect(result).toEqual({ status: "unavailable" })
+  })
 })
 
 function previewPart(id: string, messageID: string, role: ConversationPreviewPart["role"], type: ConversationPreviewPart["type"]): ConversationPreviewPart {
@@ -139,5 +200,13 @@ function previewPart(id: string, messageID: string, role: ConversationPreviewPar
     timeCreated: 1,
     text: "text",
     target: id.includes("thought") || id.includes("tool"),
+  }
+}
+
+function renderNode(id: string, children: unknown[] = [], y = 0) {
+  return {
+    id,
+    y,
+    getChildren: () => children,
   }
 }

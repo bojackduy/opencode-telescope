@@ -36,6 +36,22 @@ export function jumpTargetIDs(item: SearchResult, parts: ConversationPreviewPart
   return ids
 }
 
+type OpenCodeMessage = {
+  id: string
+  role: string
+  parentID?: string
+}
+
+export function openCodeJumpTarget(messageID: string, fallbackTargetIDs: string[], messages: readonly OpenCodeMessage[]) {
+  const message = messages.find((candidate) => candidate.id === messageID)
+  if (!message) return { available: false, targetIDs: fallbackTargetIDs }
+  if (message.role === "user") return { available: true, targetIDs: [message.id] }
+  if (message.role === "assistant" && message.parentID && messages.some((candidate) => candidate.id === message.parentID)) {
+    return { available: true, targetIDs: [message.parentID] }
+  }
+  return { available: false, targetIDs: fallbackTargetIDs }
+}
+
 export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, targetID: string) {
   if (!scroll) {
     debug.log("preview:target-scroll:skip", { reason: "no-scroll", targetID })
@@ -71,26 +87,64 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
   return true
 }
 
-export function jumpToRenderedTarget(root: unknown, targetID: string | string[]) {
-  const targetIDs = Array.isArray(targetID) ? targetID.filter(Boolean) : [targetID]
-  let attempts = 0
-  const tick = () => {
-    for (const candidate of targetIDs) {
-      const hit = findRenderableTarget(root, candidate)
-      if (hit) {
-        debug.log("jump:target", { targetID: candidate, candidates: targetIDs })
-        hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
+export type JumpToRenderedTargetOptions = {
+  ready?: () => boolean
+  unavailable?: () => boolean
+  timeout?: number
+  interval?: number
+}
+
+export type JumpToRenderedTargetResult =
+  | { status: "found"; targetID: string }
+  | { status: "unavailable" }
+  | { status: "missing" }
+
+export function jumpToRenderedTarget(
+  root: unknown | (() => unknown),
+  targetID: string | string[] | (() => string | string[]),
+  options: JumpToRenderedTargetOptions = {},
+): Promise<JumpToRenderedTargetResult> {
+  const interval = options.interval ?? 50
+  const timeout = options.timeout ?? 10_000
+  let readyAt: number | undefined
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (options.unavailable?.()) {
+        debug.log("jump:target-unavailable")
+        resolve({ status: "unavailable" })
         return
       }
+      if (options.ready && !options.ready()) {
+        setTimeout(tick, interval)
+        return
+      }
+      readyAt ??= Date.now()
+      const currentRoot = typeof root === "function" ? root() : root
+      const currentTarget = typeof targetID === "function" ? targetID() : targetID
+      const targetIDs = Array.isArray(currentTarget) ? currentTarget.filter(Boolean) : [currentTarget]
+      if (targetIDs.length === 0) {
+        debug.log("jump:target-missing", { targetIDs })
+        resolve({ status: "missing" })
+        return
+      }
+      for (const candidate of targetIDs) {
+        const hit = findRenderableTarget(currentRoot, candidate)
+        if (hit) {
+          debug.log("jump:target", { targetID: candidate, candidates: targetIDs })
+          hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
+          resolve({ status: "found", targetID: candidate })
+          return
+        }
+      }
+      if (Date.now() - readyAt < timeout) {
+        setTimeout(tick, interval)
+      } else {
+        debug.log("jump:target-missing", { targetIDs })
+        resolve({ status: "missing" })
+      }
     }
-    attempts++
-    if (attempts < 40) {
-      setTimeout(tick, 50)
-    } else {
-      debug.log("jump:target-missing", { targetIDs })
-    }
-  }
-  setTimeout(tick, 50)
+    setTimeout(tick, interval)
+  })
 }
 
 export type RenderNode = {

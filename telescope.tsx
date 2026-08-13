@@ -20,7 +20,7 @@ import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
-import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, openCodeJumpTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
 import { isIndexSyncActive, previewInWorker, requestIndexSync, searchInWorker, subscribeIndexEvents } from "./worker-service.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
@@ -1228,13 +1228,73 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
   let lastPreviewScrollKeyMs = 0
 
+  const currentSessionID = () => {
+    const route = props.api.route.current
+    if (route.name !== "session" || !route.params || typeof route.params.sessionID !== "string") return
+    return route.params.sessionID
+  }
+
   const open = () => {
     const item = selectedResult()
     if (!item) return
     const targetIDs = jumpTargetIDs(item, previewParts())
+    const sourceSessionID = currentSessionID()
+    let windowReady = false
+    let windowLoaded = false
+    let targetAvailable = true
+    let renderedTargetIDs = targetIDs
+    const setRenderedWindow = (messages: readonly { id: string; role: string; parentID?: string }[]) => {
+      const target = openCodeJumpTarget(item.messageID, targetIDs, messages)
+      windowLoaded = true
+      targetAvailable = target.available
+      renderedTargetIDs = target.targetIDs
+      windowReady = true
+    }
+    if (sourceSessionID === item.sessionID) {
+      setRenderedWindow(props.api.state.session.messages(item.sessionID))
+    } else {
+      void props.api.client.session.messages({ sessionID: item.sessionID, limit: 100 }).then((response) => {
+        if (!response.data) {
+          debug.log("jump:window:error", { sessionID: item.sessionID, messageID: item.messageID })
+          windowReady = true
+          return
+        }
+        setRenderedWindow(response.data.map((message) => message.info))
+      }).catch((error) => {
+        debug.log("jump:window:error", error instanceof Error ? error.message : String(error))
+        windowReady = true
+      })
+    }
     props.api.ui.dialog.clear()
     props.api.route.navigate("session", { sessionID: item.sessionID })
-    jumpToRenderedTarget(props.api.renderer.root, targetIDs)
+    void jumpToRenderedTarget(() => props.api.renderer.root, () => renderedTargetIDs, {
+      ready: () => {
+        if (currentSessionID() !== item.sessionID || !windowReady) return false
+        if (!windowLoaded) return true
+        const visibleIDs = new Set(props.api.state.session.messages(item.sessionID).map((message) => message.id))
+        return renderedTargetIDs.some((targetID) => visibleIDs.has(targetID))
+      },
+      unavailable: () => windowReady && !targetAvailable,
+    }).then((result) => {
+      if (result.status === "found") return
+      if (result.status === "unavailable") {
+        props.api.ui.toast({
+          variant: "warning",
+          title: "Message not available in OpenCode",
+          message: "OpenCode only renders the latest 100 messages in long sessions, so Telescope cannot jump to this older match yet. See opencode-telescope issue #4.",
+          duration: 8_000,
+        })
+        return
+      }
+
+      debug.log("jump:plugin-failure", { sessionID: item.sessionID, messageID: item.messageID, sourceSessionID, targetIDs: renderedTargetIDs })
+      props.api.ui.toast({
+        variant: "error",
+        title: "Could not jump to message",
+        message: "The message is loaded, but Telescope could not locate it in the OpenCode view. This is a Telescope bug.",
+        duration: 8_000,
+      })
+    })
   }
 
   const scrollPreview = (direction: 1 | -1, evt: ParsedKey) => {
