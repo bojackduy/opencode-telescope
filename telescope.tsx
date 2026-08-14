@@ -20,7 +20,19 @@ import { debug } from "./ui/debug.ts"
 import { syntaxStyle } from "./ui/format.ts"
 import type { TelescopeConfig } from "./ui/config.ts"
 import { inputSafeKeys, keyListLabel, matchesKey, prevent } from "./ui/keyboard.ts"
-import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, openCodeJumpTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./ui/render-target.ts"
+import { buildPreviewLayout as buildPreviewLayoutRows, ensurePreviewWindowIncludesTarget, estimatePreviewPartHeight, mergePreviewParts, previewWindowForLayout } from "./ui/preview-layout.ts"
+import {
+  collectTurnCandidates,
+  findRenderableByID,
+  findTargetWithScroll,
+  jumpTargetIDs,
+  jumpToRenderedTarget,
+  matchPartCandidate,
+  openCodeJumpTarget,
+  previewPartTargetID,
+  previewScrollAmount,
+  scrollPreviewToTarget,
+} from "./ui/render-target.ts"
 import { isIndexSyncActive, previewInWorker, requestIndexSync, searchInWorker, subscribeIndexEvents } from "./worker-service.ts"
 
 export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; onClose: () => void }) => {
@@ -133,7 +145,21 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewBeforeAdjusting = false
   let pendingCoalescedExplicit: { requestedAmount: number } | undefined
   let pendingPreviewAnchorCorrection: { anchorPartID: string; visualOffset: number; createdAt: number; expiresAt: number } | undefined
-  let pendingPreviewTarget: { itemID: string; targetID: string; generation: number; attempts: number; alignedAttempts: number; createdAt: number } | undefined
+  type PreviewAnchor = {
+    itemID: string
+    targetID: string
+    generation: number
+    engaged: boolean
+    attempts: number
+    alignedAttempts: number
+    lastAppliedScrollTop: number
+    stableSince: number
+    createdAt: number
+  }
+  const PREVIEW_ANCHOR_SETTLE_MS = 350
+  const PREVIEW_ANCHOR_MAX_ATTEMPTS = 240
+  let previewAnchor: PreviewAnchor | undefined
+  let currentPreviewTrace = ""
   let previewTargetTimer: ReturnType<typeof setTimeout> | undefined
   let previewLoadTimer: ReturnType<typeof setTimeout> | undefined
   let previewLoadRequestId = 0
@@ -141,7 +167,20 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const cancelPreviewTargetAlignment = () => {
     if (previewTargetTimer) clearTimeout(previewTargetTimer)
     previewTargetTimer = undefined
-    pendingPreviewTarget = undefined
+    previewAnchor = undefined
+  }
+  const disengagePreviewAnchor = (reason: string) => {
+    const anchor = previewAnchor
+    if (!anchor || !anchor.engaged) return
+    anchor.engaged = false
+    debug.log("preview:anchor:disengage", {
+      reason,
+      trace: currentPreviewTrace,
+      item: anchor.itemID,
+      attempts: anchor.attempts,
+      alignedAttempts: anchor.alignedAttempts,
+      scrollTop: previewScroll?.scrollTop,
+    })
   }
   const cancelPreviewLoad = () => {
     if (previewLoadTimer) clearTimeout(previewLoadTimer)
@@ -562,40 +601,11 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     onCleanup(() => clearTimeout(timer))
   })
 
-  const estimatePreviewPartHeight = (part: ConversationPreviewPart) => {
-    if (part.type === "tool") {
-      if (!part.target) return 2
-      if (part.tool === "write") return 40
-      if (part.tool === "edit" || part.tool === "apply_patch") return 35
-      return 2
-    }
-    if (part.type === "reasoning") return Math.min(24, Math.max(2, Math.ceil(part.text.length / 120)))
-    return Math.min(90, Math.max(3, Math.ceil(part.text.length / 90)))
-  }
+  const previewPaneWidth = () => Math.max(40, popupWidth() - leftWidth() - 10)
 
-  const previewPartHeight = (part: ConversationPreviewPart) => previewMeasuredHeights.get(part.id) ?? estimatePreviewPartHeight(part)
+  const previewPartHeight = (part: ConversationPreviewPart) => previewMeasuredHeights.get(part.id) ?? estimatePreviewPartHeight(part, previewPaneWidth())
 
-  const buildPreviewLayout = (parts: ConversationPreviewPart[]) => {
-    let offset = 0
-    return parts.map((part) => {
-      const height = previewPartHeight(part)
-      const row = { part, top: offset, bottom: offset + height, height }
-      offset += height
-      return row
-    })
-  }
-
-  const previewWindowForLayout = (layout: ReturnType<typeof buildPreviewLayout>, scrollTop: number, viewportHeight: number) => {
-    if (layout.length === 0) return { start: 0, end: 0 }
-    const overscan = Math.max(viewportHeight * 2, 40)
-    const from = Math.max(0, scrollTop - overscan)
-    const to = scrollTop + viewportHeight + overscan
-    const foundStart = layout.findIndex((row) => row.bottom >= from)
-    const start = foundStart === -1 ? Math.max(0, layout.length - 1) : Math.max(0, foundStart)
-    const foundEnd = layout.findIndex((row) => row.top > to)
-    const end = foundEnd === -1 ? layout.length : foundEnd
-    return { start, end: Math.min(layout.length, Math.max(start + 1, end)) }
-  }
+  const buildPreviewLayout = (parts: ConversationPreviewPart[]) => buildPreviewLayoutRows(parts, previewPartHeight)
 
   const previewVirtualLayout = createMemo(() => {
     previewHeightVersion()
@@ -611,14 +621,15 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       setPreviewWindow({ start: 0, end: 0 })
       return
     }
+    const targetPartID = selectedResult()?.id
     if (!scroll) {
-      const next = { start: 0, end: Math.min(layout.length, 20) }
+      const next = ensurePreviewWindowIncludesTarget({ start: 0, end: Math.min(layout.length, 20) }, layout, targetPartID)
       const current = previewWindow()
       if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
       return
     }
 
-    const next = previewWindowForLayout(layout, scroll.scrollTop, scroll.height)
+    const next = ensurePreviewWindowIncludesTarget(previewWindowForLayout(layout, scroll.scrollTop, scroll.height), layout, targetPartID)
     const current = previewWindow()
     if (current.start !== next.start || current.end !== next.end) setPreviewWindow(next)
   }
@@ -689,28 +700,45 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         measured: previewWindowParts().length,
         totalMeasured: previewMeasuredHeights.size,
         window: previewWindow(),
+        trace: currentPreviewTrace,
       })
-      const anchorCorrection = pendingPreviewAnchorCorrection
-      if (anchorCorrection && scroll) {
-        const now = Date.now()
-        const shouldCorrect = now <= anchorCorrection.expiresAt && lastPreviewScrollKeyMs <= anchorCorrection.createdAt
-        if (shouldCorrect) {
-          const nextLayout = buildPreviewLayout(previewParts())
-          const anchor = nextLayout.find((row) => row.part.id === anchorCorrection.anchorPartID)
-          if (anchor) {
-            const correctedScrollTop = Math.max(0, anchor.top + anchorCorrection.visualOffset)
-            const correctedWindow = previewWindowForLayout(nextLayout, correctedScrollTop, scroll.height)
-            setPreviewWindow(correctedWindow)
-            scroll.scrollTo(correctedScrollTop)
-            debug.log("preview:measure:anchor-correct", {
-              anchorPartID: anchorCorrection.anchorPartID,
-              visualOffset: anchorCorrection.visualOffset,
-              correctedScrollTop,
-              window: correctedWindow,
-            })
+      const anchor = previewAnchor
+      if (anchor?.engaged && anchor.generation === previewGeneration && anchor.itemID === selectedResult()?.id && scroll) {
+        const aligned = scrollPreviewToTarget(scroll, anchor.targetID)
+        if (aligned) {
+          anchor.alignedAttempts++
+          anchor.stableSince = Date.now()
+          anchor.lastAppliedScrollTop = scroll.scrollTop
+          debug.log("preview:anchor:re-anchor", {
+            trace: currentPreviewTrace,
+            item: anchor.itemID,
+            alignedAttempts: anchor.alignedAttempts,
+            scrollTop: scroll.scrollTop,
+          })
+        }
+      } else {
+        const anchorCorrection = pendingPreviewAnchorCorrection
+        if (anchorCorrection && scroll) {
+          const now = Date.now()
+          const shouldCorrect = now <= anchorCorrection.expiresAt && lastPreviewScrollKeyMs <= anchorCorrection.createdAt
+          if (shouldCorrect) {
+            const nextLayout = buildPreviewLayout(previewParts())
+            const anchorRow = nextLayout.find((row) => row.part.id === anchorCorrection.anchorPartID)
+            if (anchorRow) {
+              const correctedScrollTop = Math.max(0, anchorRow.top + anchorCorrection.visualOffset)
+              const correctedWindow = previewWindowForLayout(nextLayout, correctedScrollTop, scroll.height)
+              setPreviewWindow(correctedWindow)
+              scroll.scrollTo(correctedScrollTop)
+              debug.log("preview:measure:anchor-correct", {
+                anchorPartID: anchorCorrection.anchorPartID,
+                visualOffset: anchorCorrection.visualOffset,
+                correctedScrollTop,
+                window: correctedWindow,
+              })
+            }
+          } else {
+            pendingPreviewAnchorCorrection = undefined
           }
-        } else {
-          pendingPreviewAnchorCorrection = undefined
         }
       }
       setPreviewHeightVersion((value) => value + 1)
@@ -792,15 +820,24 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
       })
       if (page.parts.length > 0) {
         const currentParts = previewParts()
-        const nextParts = [...page.parts, ...currentParts]
+        const nextParts = mergePreviewParts(currentParts, page.parts)
         const nextLayout = buildPreviewLayout(nextParts)
+        const anchor = previewAnchor
+        const preservingTarget = anchor?.engaged && anchor.generation === pending.generation && anchor.itemID === item.id
         const anchorPredicted = nextLayout.find((row) => row.part.id === anchorPartID)
         const anchorPredictedTop = anchorPredicted?.top ?? 0
         const visualOffset = offsetInAnchor - (pending.intent === "explicit-scroll" ? pending.requestedAmount : 0)
-        const targetScrollTop = pending.intent === "explicit-scroll"
-          ? Math.max(0, anchorPredictedTop + offsetInAnchor - pending.requestedAmount)
-          : anchorPredictedTop + offsetInAnchor
-        const nextWindow = previewWindowForLayout(nextLayout, targetScrollTop, previewScroll?.height ?? Math.max(8, height() - 7))
+        const targetRow = nextLayout.find((row) => row.part.id === item.id)
+        const targetScrollTop = preservingTarget && targetRow
+          ? Math.max(0, targetRow.top - Math.max(1, Math.floor((previewScroll?.height ?? 10) / 3)))
+          : pending.intent === "explicit-scroll"
+            ? Math.max(0, anchorPredictedTop + offsetInAnchor - pending.requestedAmount)
+            : anchorPredictedTop + offsetInAnchor
+        const nextWindow = ensurePreviewWindowIncludesTarget(
+          previewWindowForLayout(nextLayout, targetScrollTop, previewScroll?.height ?? Math.max(8, height() - 7)),
+          nextLayout,
+          preservingTarget ? item.id : undefined,
+        )
 
         solidBatch(() => {
           setPreviewParts(nextParts)
@@ -808,12 +845,23 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         })
 
         previewScroll?.scrollTo(targetScrollTop)
-        const anchorCorrectionCreatedAt = Date.now()
-        pendingPreviewAnchorCorrection = {
-          anchorPartID,
-          visualOffset,
-          createdAt: anchorCorrectionCreatedAt,
-          expiresAt: anchorCorrectionCreatedAt + 300,
+        if (preservingTarget && anchor) {
+          anchor.lastAppliedScrollTop = previewScroll?.scrollTop ?? targetScrollTop
+          debug.log("preview:load-before:preserve-target", {
+            trace: currentPreviewTrace,
+            item: item.id,
+            targetScrollTop,
+            anchorPartID,
+            intent: pending.intent,
+          })
+        } else {
+          const anchorCorrectionCreatedAt = Date.now()
+          pendingPreviewAnchorCorrection = {
+            anchorPartID,
+            visualOffset,
+            createdAt: anchorCorrectionCreatedAt,
+            expiresAt: anchorCorrectionCreatedAt + 300,
+          }
         }
 
         debug.log("preview:load-before:commit", {
@@ -840,7 +888,24 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
           const actualAnchorTop = anchorNew?.top ?? anchorPredictedTop
           const drift = actualAnchorTop - anchorPredictedTop
 
-          if (Math.abs(drift) >= 1 && previewScroll) {
+          if (preservingTarget) {
+            const targetRow = newLayout.find((row) => row.part.id === item.id)
+            if (targetRow && previewScroll) {
+              const correctedScrollTop = Math.max(0, targetRow.top - Math.max(1, Math.floor(previewScroll.height / 3)))
+              const correctedWindow = ensurePreviewWindowIncludesTarget(previewWindowForLayout(newLayout, correctedScrollTop, previewScroll.height), newLayout, item.id)
+              setPreviewWindow(correctedWindow)
+              previewScroll.scrollTo(correctedScrollTop)
+              if (anchor) anchor.lastAppliedScrollTop = previewScroll.scrollTop
+              debug.log("preview:load-before:drift-preserve-target", {
+                loadID: pending.id,
+                item: item.id,
+                correctedScrollTop,
+                window: correctedWindow,
+              })
+            } else {
+              updatePreviewWindow()
+            }
+          } else if (Math.abs(drift) >= 1 && previewScroll) {
             const correctedScrollTop = targetScrollTop + drift
             const correctedWindow = previewWindowForLayout(newLayout, correctedScrollTop, previewScroll.height)
             setPreviewWindow(correctedWindow)
@@ -1087,60 +1152,92 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   }
 
   const runPreviewTargetAlignment = () => {
-    const target = pendingPreviewTarget
+    const anchor = previewAnchor
     const item = selectedResult()
     const scroll = previewScroll
-    if (!target || !item || item.id !== target.itemID || target.generation !== previewGeneration || !scroll) {
+    if (!anchor || !item || item.id !== anchor.itemID || anchor.generation !== previewGeneration || !scroll) {
       debug.log("preview:target-scroll:cancel", {
-        reason: !target ? "no-target" : !item ? "no-item" : item.id !== target.itemID ? "item-changed" : target.generation !== previewGeneration ? "generation-changed" : "no-scroll",
-        targetID: target?.targetID,
-        targetItemID: target?.itemID,
+        reason: !anchor ? "no-anchor" : !item ? "no-item" : item.id !== anchor.itemID ? "item-changed" : anchor.generation !== previewGeneration ? "generation-changed" : "no-scroll",
+        targetID: anchor?.targetID,
+        targetItemID: anchor?.itemID,
         selectedItemID: item?.id,
-        generation: target?.generation,
+        generation: anchor?.generation,
         currentGeneration: previewGeneration,
       })
       cancelPreviewTargetAlignment()
       return
     }
-    if (lastPreviewScrollKeyMs > target.createdAt) {
-      debug.log("preview:target-scroll:cancel", { reason: "manual-scroll", targetID: target.targetID, itemID: target.itemID, generation: target.generation, lastPreviewScrollKeyMs, createdAt: target.createdAt })
+    if (!anchor.engaged) {
       cancelPreviewTargetAlignment()
       return
     }
-
-    target.attempts++
-    const aligned = scrollPreviewToTarget(scroll, target.targetID)
-    if (aligned) {
-      target.alignedAttempts++
-      updatePreviewWindow()
-    } else {
-      debug.log("preview:target-scroll:retry-estimated", { targetID: target.targetID, itemID: target.itemID, generation: target.generation, attempts: target.attempts })
-      scrollPreviewToEstimatedWindow(item, "target-missing")
+    if (Math.abs(scroll.scrollTop - anchor.lastAppliedScrollTop) >= 2) {
+      disengagePreviewAnchor("manual-scroll")
+      return
     }
 
-    if (target.alignedAttempts >= 4 || (!aligned && target.attempts >= 12)) {
+    anchor.attempts++
+    const aligned = scrollPreviewToTarget(scroll, anchor.targetID)
+    const now = Date.now()
+    if (aligned) {
+      anchor.alignedAttempts++
+      anchor.lastAppliedScrollTop = scroll.scrollTop
+      if (anchor.stableSince === 0) anchor.stableSince = now
+      updatePreviewWindow()
+    } else {
+      anchor.stableSince = 0
+      debug.log("preview:target-scroll:retry-estimated", { targetID: anchor.targetID, itemID: anchor.itemID, generation: anchor.generation, attempts: anchor.attempts })
+      scrollPreviewToEstimatedWindow(item, "target-missing")
+      anchor.lastAppliedScrollTop = scroll.scrollTop
+    }
+
+    const settled = aligned && anchor.stableSince > 0 && now - anchor.stableSince >= PREVIEW_ANCHOR_SETTLE_MS
+    if (settled) {
+      debug.log("preview:anchor:settled", {
+        trace: currentPreviewTrace,
+        item: anchor.itemID,
+        attempts: anchor.attempts,
+        alignedAttempts: anchor.alignedAttempts,
+        scrollTop: scroll.scrollTop,
+        elapsedMs: now - anchor.createdAt,
+      })
+      cancelPreviewTargetAlignment()
+      return
+    }
+    if (anchor.attempts >= PREVIEW_ANCHOR_MAX_ATTEMPTS) {
+      debug.log("preview:anchor:gave-up", {
+        trace: currentPreviewTrace,
+        item: anchor.itemID,
+        attempts: anchor.attempts,
+        alignedAttempts: anchor.alignedAttempts,
+        scrollTop: scroll.scrollTop,
+      })
       cancelPreviewTargetAlignment()
       return
     }
     previewTargetTimer = setTimeout(() => {
       previewTargetTimer = undefined
       runPreviewTargetAlignment()
-    }, aligned ? 25 : 16)
+    }, aligned ? 50 : 16)
   }
 
   const queuePreviewTargetAlignment = (item: SearchResult, reason: string, generation = previewGeneration) => {
     if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-queue")) return
     cancelPreviewTargetAlignment()
-    pendingPreviewTarget = {
+    previewAnchor = {
       itemID: item.id,
       targetID: previewPartTargetID(item),
       generation,
+      engaged: true,
       attempts: 0,
       alignedAttempts: 0,
+      lastAppliedScrollTop: previewScroll?.scrollTop ?? 0,
+      stableSince: 0,
       createdAt: Date.now(),
     }
-    debug.log("preview:target-scroll:queue", { item: item.id, targetID: previewPartTargetID(item), reason, generation, scrollTop: previewScroll?.scrollTop })
+    debug.log("preview:target-scroll:queue", { trace: currentPreviewTrace, item: item.id, targetID: previewPartTargetID(item), reason, generation, scrollTop: previewScroll?.scrollTop })
     scrollPreviewToEstimatedWindow(item, reason)
+    if (previewAnchor) previewAnchor.lastAppliedScrollTop = previewScroll?.scrollTop ?? previewAnchor.lastAppliedScrollTop
     previewTargetTimer = setTimeout(() => {
       previewTargetTimer = undefined
       if (!isCurrentPreviewGeneration(generation, item.id, "preview:target-timer")) return
@@ -1167,6 +1264,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     }
     if (item.id === lastPreviewItemId) return
     lastPreviewItemId = item.id
+    currentPreviewTrace = debug.traceID("preview")
     const generation = nextPreviewGeneration("selected-item", item.id)
     const requestId = ++previewLoadRequestId
     cancelPreviewLoad()
@@ -1181,8 +1279,8 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     previewMeasuredHeights.clear()
     const previousScrollTop = previewScroll?.scrollTop ?? 0
     previewScroll?.scrollTo(0)
-    debug.log("preview:reset-scroll", { item: item.id, generation, previousScrollTop, nextScrollTop: previewScroll?.scrollTop ?? 0 })
-    debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8))
+    debug.log("preview:reset-scroll", { item: item.id, generation, previousScrollTop, nextScrollTop: previewScroll?.scrollTop ?? 0, trace: currentPreviewTrace })
+    debug.log("preview:new-item", item.sessionTitle?.slice(0, 40) ?? item.id.slice(-8), { trace: currentPreviewTrace, item: item.id, partType: item.partType })
     const db = dbPath()
     debug.time("preview:load")
     previewLoadTimer = setTimeout(() => {
@@ -1204,6 +1302,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
             hasMoreAfter: page.hasMoreAfter,
             first: page.parts[0]?.id,
             last: page.parts.at(-1)?.id,
+            trace: currentPreviewTrace,
           })
           solidBatch(() => {
             setPreviewParts(page.parts)
@@ -1237,17 +1336,38 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   const open = () => {
     const item = selectedResult()
     if (!item) return
+    const trace = debug.traceID("jump")
     const targetIDs = jumpTargetIDs(item, previewParts())
     const sourceSessionID = currentSessionID()
     let windowReady = false
     let windowLoaded = false
     let targetAvailable = true
     let renderedTargetIDs = targetIDs
+    let turnStartID: string | undefined
+    let turnEndID: string | undefined
+    let heuristicEnabled = false
+    let lastConfidence: "exact" | "likely" | undefined
+    debug.log("jump:start", {
+      trace,
+      sessionID: item.sessionID,
+      messageID: item.messageID,
+      partType: item.partType,
+      tool: item.tool,
+      role: item.role,
+      sourceSessionID,
+      textLength: item.text.length,
+    })
     const setRenderedWindow = (messages: readonly { id: string; role: string; parentID?: string }[]) => {
       const target = openCodeJumpTarget(item.messageID, targetIDs, messages)
       windowLoaded = true
       targetAvailable = target.available
       renderedTargetIDs = target.targetIDs
+      if (item.role === "assistant") {
+        const targetIndex = messages.findIndex((message) => message.id === item.messageID)
+        turnStartID = messages[targetIndex]?.parentID
+        turnEndID = messages.slice(targetIndex + 1).find((message) => message.role === "user")?.id
+        heuristicEnabled = Boolean(turnStartID)
+      }
       windowReady = true
     }
     if (sourceSessionID === item.sessionID) {
@@ -1255,15 +1375,34 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
     } else {
       void props.api.client.session.messages({ sessionID: item.sessionID, limit: 100 }).then((response) => {
         if (!response.data) {
-          debug.log("jump:window:error", { sessionID: item.sessionID, messageID: item.messageID })
+          debug.log("jump:window:error", { trace, sessionID: item.sessionID, messageID: item.messageID })
           windowReady = true
           return
         }
         setRenderedWindow(response.data.map((message) => message.info))
       }).catch((error) => {
-        debug.log("jump:window:error", error instanceof Error ? error.message : String(error))
+        debug.log("jump:window:error", { trace, error: error instanceof Error ? error.message : String(error) })
         windowReady = true
       })
+    }
+    const resolveExact = () => {
+      if (!heuristicEnabled || !turnStartID) return undefined
+      const start = findTargetWithScroll(props.api.renderer.root, turnStartID)
+      if (!start) return undefined
+      const candidates = collectTurnCandidates(start.scroll, turnStartID, turnEndID)
+      if (candidates.length === 0) return undefined
+      const match = matchPartCandidate(candidates, item.text, item.partType, item.tool)
+      if (!match) return undefined
+      lastConfidence = match.confidence
+      debug.log("jump:heuristic-hit", {
+        trace,
+        confidence: match.confidence,
+        kind: match.kind,
+        candidates: candidates.length,
+        turnStartID,
+        turnEndID,
+      })
+      return { target: match.node, scroll: start.scroll, label: `heuristic:${match.kind}:${match.confidence}` }
     }
     props.api.ui.dialog.clear()
     props.api.route.navigate("session", { sessionID: item.sessionID })
@@ -1275,9 +1414,37 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         return renderedTargetIDs.some((targetID) => visibleIDs.has(targetID))
       },
       unavailable: () => windowReady && !targetAvailable,
+      resolve: resolveExact,
     }).then((result) => {
-      if (result.status === "found") return
+      if (result.status === "found") {
+        if (result.method === "resolve") {
+          debug.log("jump:done", { trace, outcome: "exact", confidence: lastConfidence, targetID: result.targetID })
+          return
+        }
+        if (item.role === "assistant") {
+          debug.log("jump:done", {
+            trace,
+            outcome: "turn-fallback",
+            targetID: result.targetID,
+            partType: item.partType,
+            tool: item.tool,
+            turnStartID,
+            turnEndID,
+            textLength: item.text.length,
+          })
+          props.api.ui.toast({
+            variant: "info",
+            title: "Jumped to the containing turn",
+            message: "OpenCode doesn't expose this matched part in the rendered view, so Telescope jumped to its parent prompt.",
+            duration: 5_000,
+          })
+          return
+        }
+        debug.log("jump:done", { trace, outcome: "exact-user", targetID: result.targetID })
+        return
+      }
       if (result.status === "unavailable") {
+        debug.log("jump:done", { trace, outcome: "truncated", messageID: item.messageID, sessionID: item.sessionID })
         props.api.ui.toast({
           variant: "warning",
           title: "Message not available in OpenCode",
@@ -1287,7 +1454,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
         return
       }
 
-      debug.log("jump:plugin-failure", { sessionID: item.sessionID, messageID: item.messageID, sourceSessionID, targetIDs: renderedTargetIDs })
+      debug.log("jump:plugin-failure", { trace, sessionID: item.sessionID, messageID: item.messageID, sourceSessionID, targetIDs: renderedTargetIDs, turnStartID, turnEndID })
       props.api.ui.toast({
         variant: "error",
         title: "Could not jump to message",
@@ -1307,6 +1474,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
 
     const beforeState = previewScrollState()
     lastPreviewScrollKeyMs = Date.now()
+    disengagePreviewAnchor("preview-scroll-key")
     cancelPreviewTargetAlignment()
     debug.log("preview:scroll-key", { direction, state: beforeState })
 

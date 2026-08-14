@@ -279,9 +279,54 @@ preview:target-scroll:queue
 preview:target-scroll:estimated
 preview:target-scroll:retry-estimated
 preview:target-scroll:cancel
+preview:anchor:disengage
+preview:anchor:re-anchor
+preview:anchor:settled
+preview:anchor:gave-up
+preview:load-before:preserve-target
+jump:start
+jump:heuristic-hit
+jump:done
 jump:target
+jump:target:resolve
 jump:target-missing
+jump:plugin-failure
 ```
+
+Every `jump:*` line and every `preview:*` line on the current item carries a
+`trace` id, so one full navigation outcome can be reconstructed by filtering
+on that id. Debug writes are buffered and flushed every 200ms (or on exit) to
+avoid perturbing low-power timing; render-tree data is logged as candidate
+counts, match kind, and confidence — never as raw conversation content.
+
+### Manual jump validation matrix
+
+| Target type                 | Same session                     | Cross session                    |
+| --------------------------- | -------------------------------- | -------------------------------- |
+| User text                   | Jump exact prompt                | Jump exact prompt                |
+| Assistant text              | Exact part or turn fallback toast | Exact part or turn fallback toast |
+| Thought (thinking shown)    | Likely part or turn fallback     | Likely part or turn fallback     |
+| Thought (thinking hidden)   | Turn fallback toast expected     | Turn fallback toast expected     |
+| Tool: edit/apply_patch/write | Exact diff part or turn fallback | Exact diff part or turn fallback |
+| Tool: bash/etc.             | Turn fallback toast expected     | Turn fallback toast expected     |
+| Tool details hidden         | Turn fallback toast expected     | Turn fallback toast expected     |
+| Outside latest 100 messages | Issue #4 warning toast           | Issue #4 warning toast           |
+
+Acceptance for each row: an exact jump must never be reported without a
+matched rendered candidate; every turn fallback shows the info toast; the
+`jump:done` log records the outcome and confidence for the trace id.
+
+### Preview anchoring checklist
+
+1. Select a match, wait for layout to settle — the matched part must remain
+   anchored at roughly the upper third.
+2. Rapidly move between results — each preview must settle on its own match.
+3. Scroll the preview with keys or mouse wheel — anchoring must disengage
+   (log `preview:anchor:disengage`).
+4. Load earlier context while the anchor is engaged — the match must stay in
+   view (log `preview:load-before:preserve-target`).
+5. Load earlier context after scrolling manually — the current viewport
+   position must be preserved, not the match.
 
 ## Known Issues And Risks
 

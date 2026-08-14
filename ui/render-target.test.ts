@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test"
-import { findRenderableByID, jumpTargetIDs, jumpToRenderedTarget, messageTargetID, openCodeJumpTarget, previewPartTargetID, previewScrollAmount, scrollPreviewToTarget } from "./render-target.ts"
+import {
+  collectTurnCandidates,
+  findRenderableByID,
+  findTargetWithScroll,
+  jumpTargetIDs,
+  jumpToRenderedTarget,
+  matchPartCandidate,
+  messageTargetID,
+  openCodeJumpTarget,
+  previewPartTargetID,
+  previewScrollAmount,
+  scrollPreviewToTarget,
+} from "./render-target.ts"
 import type { ConversationPreviewPart, SearchResult } from "../search.ts"
 
 describe("render-target utils", () => {
@@ -170,7 +182,7 @@ describe("render-target utils", () => {
       timeout: 1,
     })
 
-    expect(result).toEqual({ status: "found", targetID: "target" })
+    expect(result).toEqual({ status: "found", targetID: "target", method: "id" })
     expect(scrolledBy).toBe(9)
   })
 
@@ -187,6 +199,100 @@ describe("render-target utils", () => {
       timeout: 100,
     })
     expect(result).toEqual({ status: "unavailable" })
+  })
+
+  test("jumpToRenderedTarget prefers a heuristic resolve hit", async () => {
+    let scrolledBy = 0
+    const scroll = {
+      ...renderNode("scroll", [], 2),
+      scrollBy(amount: number) {
+        scrolledBy = amount
+      },
+    }
+    const target = renderNode("part-node", [], 12)
+
+    const result = await jumpToRenderedTarget(renderNode("root", [scroll]), "fallback-id", {
+      resolve: () => ({ target, scroll, label: "heuristic:text:exact" }),
+      interval: 1,
+      timeout: 5,
+    })
+
+    expect(result).toEqual({ status: "found", targetID: "heuristic:text:exact", method: "resolve" })
+    expect(scrolledBy).toBe(9)
+  })
+
+  test("collectTurnCandidates gathers text, code, and diff content between user messages", () => {
+    const scroll = {
+      ...renderNode("scroll", [
+        renderNode("msg_0", []),
+        renderNode("markdown-node", [renderNode("inner", [])]).withContent("the full markdown text"),
+        renderNode("code-node", []).withPlainText("const code = true"),
+        renderNode("diff-node", []).withDiff("@@ -1 +1 @@\n+added"),
+        renderNode("msg_1", []),
+        renderNode("msg_2", [renderNode("ignored", [])]),
+      ]),
+      scrollBy() {},
+    }
+
+    const candidates = collectTurnCandidates(scroll, "msg_0", "msg_1")
+    expect(candidates.map((candidate) => candidate.kind)).toEqual(["text", "code", "diff"])
+    expect(candidates[0]?.text).toBe("the full markdown text")
+  })
+
+  test("matchPartCandidate prefers exact text matches and falls back to ordered coverage", () => {
+    const exact = renderNode("exact-node", []).withContent("exact target body")
+    const likely = renderNode("likely-node", []).withContent("a longer body that contains target words in order")
+    const candidates = [
+      { node: exact, text: "exact target body", kind: "text" as const },
+      { node: likely, text: "a longer body that contains target words in order", kind: "text" as const },
+    ]
+
+    expect(matchPartCandidate(candidates, "exact target body", "text")?.node.id).toBe("exact-node")
+    expect(matchPartCandidate(candidates, "target words", "text")).toBeUndefined()
+
+    const coverageCandidates = candidates.slice(1)
+    const hit = matchPartCandidate(coverageCandidates, "body target order", "text")
+    expect(hit?.node.id).toBe("likely-node")
+    expect(hit?.confidence).toBe("likely")
+  })
+
+  test("matchPartCandidate matches patch diffs and reasoning summaries heuristically", () => {
+    const diffNode = renderNode("diff-node", []).withDiff("@@ -1 +1 @@\n+the patch line")
+    const diffHit = matchPartCandidate(
+      [{ node: diffNode, text: "@@ -1 +1 @@\n+the patch line", kind: "diff" as const }],
+      "src/service.ts\n@@ -1 +1 @@\n+the patch line",
+      "tool",
+      "apply_patch",
+    )
+    expect(diffHit?.node.id).toBe("diff-node")
+    expect(diffHit?.confidence).toBe("exact")
+
+    const summaryNode = renderNode("summary-node", []).withContent("thinking about the plan step by step")
+    const summaryHit = matchPartCandidate(
+      [{ node: summaryNode, text: "thinking about the plan step by step", kind: "text" as const }],
+      "thinking about the plan step by step and then deciding",
+      "reasoning",
+    )
+    expect(summaryHit?.node.id).toBe("summary-node")
+    expect(summaryHit?.confidence).toBe("likely")
+
+    expect(matchPartCandidate(
+      [{ node: renderNode("tool-node", []).withContent("short"), text: "short", kind: "text" as const }],
+      "short",
+      "tool",
+      "bash",
+    )).toBeUndefined()
+  })
+
+  test("findTargetWithScroll locates a target and its scrolling ancestor", () => {
+    const scroll = {
+      ...renderNode("scroll", [renderNode("target", [], 5)]),
+      scrollBy() {},
+    }
+    const hit = findTargetWithScroll(renderNode("root", [scroll]), "target")
+    expect(hit?.target.id).toBe("target")
+    expect(hit?.scroll.id).toBe("scroll")
+    expect(findTargetWithScroll(renderNode("root"), "missing")).toBeUndefined()
   })
 })
 
@@ -208,5 +314,14 @@ function renderNode(id: string, children: unknown[] = [], y = 0) {
     id,
     y,
     getChildren: () => children,
+    withContent(content: string) {
+      return { ...this, content }
+    },
+    withPlainText(plainText: string) {
+      return { ...this, plainText }
+    },
+    withDiff(diff: string) {
+      return { ...this, diff }
+    },
   }
 }

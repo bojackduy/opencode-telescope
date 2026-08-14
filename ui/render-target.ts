@@ -87,17 +87,82 @@ export function scrollPreviewToTarget(scroll: ScrollBoxRenderable | undefined, t
   return true
 }
 
+export type JumpResolvedHit = {
+  target: RenderNode
+  scroll: ScrollNode
+  label: string
+}
+
 export type JumpToRenderedTargetOptions = {
   ready?: () => boolean
   unavailable?: () => boolean
+  resolve?: () => JumpResolvedHit | undefined
   timeout?: number
   interval?: number
 }
 
 export type JumpToRenderedTargetResult =
-  | { status: "found"; targetID: string }
+  | { status: "found"; targetID: string; method: "id" | "resolve" }
   | { status: "unavailable" }
   | { status: "missing" }
+
+export type TextCandidate = {
+  node: RenderNode
+  text: string
+  kind: "text" | "code" | "diff"
+}
+
+export function findTargetWithScroll(root: unknown, targetID: string) {
+  return findRenderableTarget(root, targetID)
+}
+
+export function collectTurnCandidates(scroll: ScrollNode, startID: string, endID?: string): TextCandidate[] {
+  const children = scroll.getChildren().filter(isRenderNode)
+  const startIndex = children.findIndex((child) => child.id === startID)
+  if (startIndex === -1) return []
+  const endIndex = endID ? children.findIndex((child) => child.id === endID) : -1
+  const stop = endIndex === -1 ? children.length : endIndex
+  const candidates: TextCandidate[] = []
+  for (let index = startIndex + 1; index < stop; index++) {
+    collectNodeTexts(children[index]!, candidates)
+  }
+  return candidates
+}
+
+export function matchPartCandidate(
+  candidates: TextCandidate[],
+  partText: string,
+  partType: SearchResult["partType"],
+  tool?: string,
+): { node: RenderNode; confidence: "exact" | "likely"; kind: TextCandidate["kind"] } | undefined {
+  const normalized = normalizeText(partText)
+  if (partType === "tool") {
+    if (normalized.length < 20) return undefined
+    for (const candidate of candidates) {
+      const candidateText = normalizeText(candidate.text)
+      if (candidateText.length < 20) continue
+      if (candidateText.includes(normalized) || normalized.includes(candidateText)) {
+        return { node: candidate.node, confidence: "exact", kind: candidate.kind }
+      }
+    }
+    return matchOrderedCoverage(candidates, normalized, 0.5, "likely")
+  }
+  if (partType === "reasoning") {
+    const tokens = tokenize(normalized.slice(0, 200))
+    if (tokens.length < 2) return undefined
+    return matchOrderedCoverage(candidates, tokens.join(" "), 0.5, "likely")
+  }
+  if (normalized.length === 0) return undefined
+  for (const candidate of candidates) {
+    const candidateText = normalizeText(candidate.text)
+    if (candidateText === normalized) {
+      return { node: candidate.node, confidence: "exact", kind: candidate.kind }
+    }
+  }
+  const tokens = tokenize(normalized)
+  if (tokens.length < 3) return undefined
+  return matchOrderedCoverage(candidates, tokens.join(" "), 0.6, "likely")
+}
 
 export function jumpToRenderedTarget(
   root: unknown | (() => unknown),
@@ -120,6 +185,15 @@ export function jumpToRenderedTarget(
       }
       readyAt ??= Date.now()
       const currentRoot = typeof root === "function" ? root() : root
+      if (options.resolve) {
+        const resolved = options.resolve()
+        if (resolved) {
+          debug.log("jump:target:resolve", { targetID: resolved.label })
+          resolved.scroll.scrollBy(resolved.target.y - resolved.scroll.y - 1)
+          resolve({ status: "found", targetID: resolved.label, method: "resolve" })
+          return
+        }
+      }
       const currentTarget = typeof targetID === "function" ? targetID() : targetID
       const targetIDs = Array.isArray(currentTarget) ? currentTarget.filter(Boolean) : [currentTarget]
       if (targetIDs.length === 0) {
@@ -132,7 +206,7 @@ export function jumpToRenderedTarget(
         if (hit) {
           debug.log("jump:target", { targetID: candidate, candidates: targetIDs })
           hit.scroll.scrollBy(hit.target.y - hit.scroll.y - 1)
-          resolve({ status: "found", targetID: candidate })
+          resolve({ status: "found", targetID: candidate, method: "id" })
           return
         }
       }
@@ -166,6 +240,68 @@ function findRenderableTarget(node: unknown, targetID: string, scroll?: ScrollNo
     const result = findRenderableTarget(child, targetID, nextScroll)
     if (result) return result
   }
+}
+
+function collectNodeTexts(node: RenderNode, out: TextCandidate[]) {
+  const content = (node as unknown as Record<string, unknown>).content
+  const contentText = textFromContent(content)
+  if (contentText) out.push({ node, text: contentText, kind: "text" })
+  const plainText = (node as unknown as Record<string, unknown>).plainText
+  if (typeof plainText === "string" && plainText) out.push({ node, text: plainText, kind: "code" })
+  const diff = (node as unknown as Record<string, unknown>).diff
+  if (typeof diff === "string" && diff) out.push({ node, text: diff, kind: "diff" })
+  for (const child of node.getChildren()) {
+    if (isRenderNode(child)) collectNodeTexts(child, out)
+  }
+}
+
+function textFromContent(value: unknown): string | undefined {
+  if (typeof value === "string" && value) return value
+  if (!value || typeof value !== "object") return undefined
+  const chunks = (value as { chunks?: unknown }).chunks
+  if (!Array.isArray(chunks)) return undefined
+  return chunks
+    .map((chunk) => (chunk && typeof chunk === "object" && "text" in chunk ? String((chunk as { text: unknown }).text) : ""))
+    .join("")
+}
+
+function matchOrderedCoverage(
+  candidates: TextCandidate[],
+  query: string,
+  threshold: number,
+  confidence: "exact" | "likely",
+): { node: RenderNode; confidence: "exact" | "likely"; kind: TextCandidate["kind"] } | undefined {
+  const tokens = tokenize(query)
+  if (tokens.length < 2) return undefined
+  let best: { candidate: TextCandidate; coverage: number } | undefined
+  for (const candidate of candidates) {
+    const coverage = orderedTokenCoverage(normalizeText(candidate.text), tokens)
+    if (!best || coverage > best.coverage) best = { candidate, coverage }
+  }
+  if (!best || best.coverage < threshold) return undefined
+  return { node: best.candidate.node, confidence, kind: best.candidate.kind }
+}
+
+function orderedTokenCoverage(text: string, tokens: string[]) {
+  if (text.length === 0) return 0
+  const lower = text.toLowerCase()
+  let matched = 0
+  let searchPos = 0
+  for (const token of tokens) {
+    const index = lower.indexOf(token.toLowerCase(), searchPos)
+    if (index === -1) break
+    matched++
+    searchPos = index + token.length
+  }
+  return matched / tokens.length
+}
+
+function normalizeText(value: string) {
+  return value.replace(/\s+/g, " ").trim()
+}
+
+function tokenize(value: string) {
+  return value.trim().split(/\s+/).filter(Boolean).slice(0, 32)
 }
 
 function isRenderNode(value: unknown): value is RenderNode {
