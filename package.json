@@ -4,7 +4,7 @@
   "version": "1.2.3",
   "description": "OpenCode TUI plugin for fuzzy and semantic search across local conversation history, session transcripts, and AI coding chats",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bojackduy/opencode-telescope.git"

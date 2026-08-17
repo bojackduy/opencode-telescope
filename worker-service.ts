@@ -34,6 +34,7 @@ type SearchRequest = {
   accumulation: SearchResult[]
   onStreamBatch?: (results: SearchResult[], bucketLabel: string, isComplete: boolean) => void
   pendingIndexResponse?: SearchResponse
+  streamComplete?: boolean
 }
 const searchRequests = new Map<number, SearchRequest>()
 type PreviewRequest = { resolve: (value: ConversationPreviewPage) => void; reject: (error: Error) => void }
@@ -64,17 +65,21 @@ export function searchInWorker(
     if (opts?.onStreamBatch) {
       setTimeout(() => {
         if (!searchRequests.has(id)) return
-        if (activeStreamingRequestID !== undefined && activeStreamingRequestID !== id) stopStreaming(activeStreamingRequestID)
-        activeStreamingRequestID = id
-        ensureStreamingWorker().postMessage({
-          type: "stream-search",
-          id,
-          query: input.query,
-          limit: input.limit,
-          directory: input.directory,
-          role: input.role,
-          dbPath: input.dbPath,
-        })
+        try {
+          if (activeStreamingRequestID !== undefined && activeStreamingRequestID !== id) stopStreaming(activeStreamingRequestID)
+          activeStreamingRequestID = id
+          ensureStreamingWorker().postMessage({
+            type: "stream-search",
+            id,
+            query: input.query,
+            limit: input.limit,
+            directory: input.directory,
+            role: input.role,
+            dbPath: input.dbPath,
+          })
+        } catch (error) {
+          failStreamingRequest(id, error instanceof Error ? error : new Error(String(error)))
+        }
       }, STREAM_START_DELAY_MS)
     }
   })
@@ -156,6 +161,11 @@ function ensureSearchWorker() {
     } satisfies SearchResponse
     const noUsableIndex = response.results.length === 0 && (response.keywordState === "missing" || response.keywordState === "empty" || response.keywordState === "indexing")
     if (noUsableIndex && request.onStreamBatch) {
+      if (request.streamComplete) {
+        searchRequests.delete(msg.id)
+        request.resolve({ ...response, results: request.accumulation })
+        return
+      }
       request.pendingIndexResponse = response
       return
     }
@@ -179,11 +189,7 @@ function ensureStreamingWorker() {
     const request = searchRequests.get(msg.id)
     if (!request) return
     if (msg.type === "stream-error") {
-      if (request.pendingIndexResponse) {
-        searchRequests.delete(msg.id)
-        if (activeStreamingRequestID === msg.id) activeStreamingRequestID = undefined
-        request.resolve(request.pendingIndexResponse)
-      }
+      failStreamingRequest(msg.id, new Error(msg.error || "Streaming search failed"))
       return
     }
     if (msg.type !== "stream-batch" || !request.onStreamBatch) return
@@ -195,18 +201,22 @@ function ensureStreamingWorker() {
       }
     }
     request.onStreamBatch(request.accumulation, msg.bucketLabel, msg.isComplete)
-    if (msg.isComplete && activeStreamingRequestID === msg.id) activeStreamingRequestID = undefined
-    if (msg.isComplete && request.pendingIndexResponse) {
-      const response = request.pendingIndexResponse
-      searchRequests.delete(msg.id)
+    if (msg.isComplete) {
+      request.streamComplete = true
       if (activeStreamingRequestID === msg.id) activeStreamingRequestID = undefined
-      request.resolve({ ...response, results: request.accumulation })
+      if (request.pendingIndexResponse) {
+        const response = request.pendingIndexResponse
+        searchRequests.delete(msg.id)
+        request.resolve({ ...response, results: request.accumulation })
+      }
     }
   }
-  streamingWorker.onerror = () => {
+  streamingWorker.onerror = (event) => {
+    const id = activeStreamingRequestID
     streamingWorker?.terminate()
     streamingWorker = undefined
     activeStreamingRequestID = undefined
+    if (id !== undefined) failStreamingRequest(id, new Error(event.message || "Streaming worker failed"))
   }
   return streamingWorker
 }
@@ -216,6 +226,18 @@ function stopStreaming(id: number) {
   streamingWorker?.terminate()
   streamingWorker = undefined
   activeStreamingRequestID = undefined
+}
+
+function failStreamingRequest(id: number, error: Error) {
+  const request = searchRequests.get(id)
+  if (!request) return
+  searchRequests.delete(id)
+  if (activeStreamingRequestID === id) activeStreamingRequestID = undefined
+  if (request.pendingIndexResponse) {
+    request.resolve({ ...request.pendingIndexResponse, results: request.accumulation })
+    return
+  }
+  request.reject(error)
 }
 
 function ensurePreviewWorker() {
