@@ -35,6 +35,7 @@ type SearchRequest = {
   onStreamBatch?: (results: SearchResult[], bucketLabel: string, isComplete: boolean) => void
   pendingIndexResponse?: SearchResponse
   streamComplete?: boolean
+  isRecent: boolean
 }
 const searchRequests = new Map<number, SearchRequest>()
 type PreviewRequest = { resolve: (value: ConversationPreviewPage) => void; reject: (error: Error) => void }
@@ -51,7 +52,7 @@ export function searchInWorker(
   const worker = ensureSearchWorker()
   const id = ++requestID
   return new Promise((resolve, reject) => {
-    searchRequests.set(id, { resolve, reject, accumulation: [], onStreamBatch: opts?.onStreamBatch })
+    searchRequests.set(id, { resolve, reject, accumulation: [], onStreamBatch: opts?.onStreamBatch, isRecent: !input.query.trim() })
     worker.postMessage({
       type: input.query ? "search" : "recent",
       id,
@@ -63,6 +64,8 @@ export function searchInWorker(
       dbPath: input.dbPath,
     })
     if (opts?.onStreamBatch) {
+      const isRecent = !input.query.trim()
+      const delay = isRecent ? 10 : STREAM_START_DELAY_MS
       setTimeout(() => {
         if (!searchRequests.has(id)) return
         try {
@@ -80,7 +83,7 @@ export function searchInWorker(
         } catch (error) {
           failStreamingRequest(id, error instanceof Error ? error : new Error(String(error)))
         }
-      }, STREAM_START_DELAY_MS)
+      }, delay)
     }
   })
 }
@@ -160,7 +163,8 @@ function ensureSearchWorker() {
       stale: Boolean(msg.stale),
     } satisfies SearchResponse
     const noUsableIndex = response.results.length === 0 && (response.keywordState === "missing" || response.keywordState === "empty" || response.keywordState === "indexing")
-    if (noUsableIndex && request.onStreamBatch) {
+    const shouldFallbackToRawWindow = response.results.length === 0 && request.isRecent && Boolean(request.onStreamBatch)
+    if ((noUsableIndex || shouldFallbackToRawWindow) && request.onStreamBatch) {
       if (request.streamComplete) {
         searchRequests.delete(msg.id)
         request.resolve({ ...response, results: request.accumulation })
