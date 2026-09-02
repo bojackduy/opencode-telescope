@@ -1,5 +1,7 @@
 # opencode-telescope
 
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue?style=flat-square)](LICENSE)
+
 OpenCode TUI plugin for fast keyword search across local conversation history, session transcripts, and past AI coding chats.
 
 Install the npm package `@bojackduy/opencode-telescope` to grep OpenCode chat history, find old code snippets, scope searches to user asks / assistant replies / thoughts / patches, and jump back to any session instantly.
@@ -179,3 +181,7 @@ Reads the OpenCode local SQLite session database in read-only mode, parses conve
 OpenCode plugin, OpenCode TUI, fuzzy finder, semantic search, vector search, embeddings, sqlite-vec, llama-server, conversation search, chat history search, AI coding session search, LLM history, local session search, Telescope-style picker.
 
 ![Demo animation](./assets/demo.gif)
+
+## License
+
+[GNU Affero General Public License v3.0 or later](LICENSE)

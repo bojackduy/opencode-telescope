@@ -1,10 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@bojackduy/opencode-telescope",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "OpenCode TUI plugin for fuzzy and semantic search across local conversation history, session transcripts, and AI coding chats",
   "type": "module",
-  "license": "AGPL-3.0-only",
+  "license": "AGPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bojackduy/opencode-telescope.git"
