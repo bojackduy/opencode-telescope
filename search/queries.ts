@@ -17,12 +17,12 @@ import type {
   SearchResponse,
   VectorState,
 } from "./types.ts"
-import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, ftsQuery, expandQuery } from "./text.ts"
+import { rowToSearchResult, rowToVectorResult, indexSourceRowToRows, chunkRowForEmbedding, ftsQuery, expandQuery } from "./text.ts"
 import { parseSearchQuery, type ParsedSearchQuery, type SearchQueryClause } from "./query.ts"
 import { resolveDatabasePath, searchIndexPath } from "./db-path.ts"
 import { LlamaEmbeddingClient } from "./embedding.ts"
 import { migrateSearchIndex, getMeta, setMeta, SEARCH_INDEX_VERSION, DOCUMENT_EXTRACTOR_VERSION } from "./schema.ts"
-import { hybridBlend, searchVector, configureCustomSQLite, loadVecExtension, isVectorReady } from "./vector.ts"
+import { hybridBlend, searchVector, configureCustomSQLite, loadVecExtension, isVectorReady, removeVectorChunksForDocIds } from "./vector.ts"
 
 // Load custom SQLite before any Database() constructor runs,
 // otherwise Database.setCustomSQLite() fails with "SQLite already loaded"
@@ -743,11 +743,16 @@ export async function syncKeywordIndexForDbPath(dbPath: string) {
   const rowCount = index.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM document_index").get()?.count ?? 0
   const storedCheckpoint = Number(getMeta(index, "source_max_part_rowid") ?? 0)
   const storedVersion = getMeta(index, "index_version")
+  const storedExtractor = getMeta(index, "extractor_version")
   let checkpoint = storedCheckpoint
 
-  // Existing indexes predate row checkpoints. Reconcile their recent tail once,
-  // preserving the last-good corpus instead of rebuilding it from the source DB.
-  if ((!storedCheckpoint || storedVersion !== SEARCH_INDEX_VERSION) && rowCount > 0) {
+  // Chunker v2 changes document granularity (1 part -> N chunks). Old sidecars
+  // have single :0 chunks with ID-only hashes, so re-chunk from scratch once.
+  if (storedExtractor !== DOCUMENT_EXTRACTOR_VERSION && rowCount > 0) {
+    checkpoint = 0
+  } else if ((!storedCheckpoint || storedVersion !== SEARCH_INDEX_VERSION) && rowCount > 0) {
+    // Existing indexes predate row checkpoints. Reconcile their recent tail once,
+    // preserving the last-good corpus instead of rebuilding it from the source DB.
     checkpoint = Math.max(0, sourceMaxRowid - INDEX_RECONCILE_TAIL)
   } else if (rowCount > 0) {
     checkpoint = Math.max(0, Math.min(storedCheckpoint, sourceMaxRowid) - INDEX_UPDATE_RECONCILE_TAIL)
@@ -806,6 +811,12 @@ export function removeIndexedRowsForDbPath(dbPath: string, target: { partID?: st
   if (!filter) return
   const [column, value] = filter
   const rows = index.query<{ rowid: number }, [string]>(`SELECT rowid FROM document_index WHERE ${column} = ?`).all(value)
+  // Collect chunk doc_ids before deleting so vec_map stays consistent (no rowid join).
+  let chunkDocIds: string[] = []
+  try {
+    const documentColumn = column === "id" ? "part_id" : column
+    chunkDocIds = index.query<{ doc_id: string }, [string]>(`SELECT doc_id FROM document WHERE ${documentColumn} = ?`).all(value).map((r) => r.doc_id)
+  } catch {}
   index.exec("BEGIN IMMEDIATE")
   try {
     if (getMeta(index, "scoped_fts_state") === "ready") {
@@ -815,6 +826,7 @@ export function removeIndexedRowsForDbPath(dbPath: string, target: { partID?: st
     index.query(`DELETE FROM document_index WHERE ${column} = ?`).run(value)
     const documentColumn = column === "id" ? "part_id" : column
     index.query(`DELETE FROM document WHERE ${documentColumn} = ?`).run(value)
+    removeVectorChunksForDocIds(index, chunkDocIds)
     if (getMeta(index, "vector_state") === "enabled") setMeta(index, "vector_state", "stale")
     index.exec("COMMIT")
   } catch (err) {
@@ -831,7 +843,14 @@ function replaceIndexedPart(index: Database, source: IncrementalSourceRow, scope
     if (scopedFtsReady && existing) index.query("DELETE FROM document_fts_scope WHERE rowid = ?").run(existing.rowid)
     if (maintainLegacyFts && existing) index.query("DELETE FROM document_fts WHERE rowid = ?").run(existing.rowid)
     index.query("DELETE FROM document_index WHERE id = ?").run(source.id)
-    index.query("DELETE FROM document WHERE doc_id = ?").run(`telescope:${source.session_id}:${source.message_id}:${source.id}:0`)
+    // Delete ALL chunks for the part (stable doc_ids, not just :0).
+    try {
+      const stale = index.query<{ doc_id: string }, [string]>("SELECT doc_id FROM document WHERE part_id = ?").all(source.id).map((r) => r.doc_id)
+      index.query("DELETE FROM document WHERE part_id = ?").run(source.id)
+      removeVectorChunksForDocIds(index, stale)
+    } catch {
+      index.query("DELETE FROM document WHERE part_id = ?").run(source.id)
+    }
     return
   }
 
@@ -849,8 +868,28 @@ function replaceIndexedPart(index: Database, source: IncrementalSourceRow, scope
   }
   const now = Date.now()
   for (const row of indexSourceRowToRows(sourceRow)) {
-    const docID = `telescope:${row.session_id}:${row.message_id}:${row.id}:0`
-    index.query(`
+    const chunks = chunkRowForEmbedding({ ...sourceRow, kind: row.kind ?? (row.role === "user" ? "user" : "assistant"), text: row.text })
+    const wantedDocIds = new Set(chunks.map((c) => c.doc_id))
+    const wantedHashes = new Map(chunks.map((c) => [c.doc_id, c.source_hash] as const))
+    // Remove stale chunks when a part shrinks (e.g. 3 chunks -> 1).
+    // Only invalidate vectors for removed/changed chunks (content hash), not
+    // unchanged ones, so incremental sync doesn't force full re-embeds.
+    let existingHashes = new Map<string, string>()
+    try {
+      const existingChunks = index.query<{ doc_id: string; source_hash: string }, [string]>("SELECT doc_id, source_hash FROM document WHERE part_id = ?").all(row.id)
+      existingHashes = new Map(existingChunks.map((r) => [r.doc_id, r.source_hash] as const))
+      const removed = existingChunks.map((r) => r.doc_id).filter((id) => !wantedDocIds.has(id))
+      if (removed.length) {
+        for (const docId of removed) index.query("DELETE FROM document WHERE doc_id = ?").run(docId)
+        removeVectorChunksForDocIds(index, removed)
+      }
+    } catch {}
+    const changedDocIds: string[] = []
+    for (const chunk of chunks) {
+      const prev = existingHashes.get(chunk.doc_id)
+      if (prev !== undefined && prev !== chunk.source_hash) changedDocIds.push(chunk.doc_id)
+      const docID = chunk.doc_id
+      index.query(`
       INSERT INTO document(doc_id, part_id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, chunk_index, text, source_hash, extractor_version, indexed_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(doc_id) DO UPDATE SET
@@ -864,11 +903,14 @@ function replaceIndexedPart(index: Database, source: IncrementalSourceRow, scope
         part_type = excluded.part_type,
         tool = excluded.tool,
         time_created = excluded.time_created,
+        chunk_index = excluded.chunk_index,
         text = excluded.text,
         source_hash = excluded.source_hash,
         extractor_version = excluded.extractor_version,
         indexed_at = excluded.indexed_at
-    `).run(docID, row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, row.kind ?? "assistant", row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, 0, row.text, hashPartData({ session_id: row.session_id, message_id: row.message_id, part_id: row.id }), DOCUMENT_EXTRACTOR_VERSION, now)
+    `).run(docID, row.id, row.message_id, row.session_id, row.session_title ?? "Untitled session", row.directory, row.kind ?? "assistant", row.role, row.part_type ?? "text", row.tool ?? null, row.time_created, chunk.chunk_index, chunk.text, chunk.source_hash, DOCUMENT_EXTRACTOR_VERSION, now)
+    }
+    if (changedDocIds.length) removeVectorChunksForDocIds(index, changedDocIds)
     index.query(`
       INSERT INTO document_index(id, message_id, session_id, session_title, directory, kind, role, part_type, tool, time_created, text)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -971,10 +1013,6 @@ function sourceState(db: Database, sourcePath: string) {
   return { dataVersion, mtimeMs: stat.mtimeMs }
 }
 
-function hashPartData(value: { session_id: string; message_id: string; part_id: string }) {
-  return createHash("sha256").update(`${value.session_id}:${value.message_id}:${value.part_id}`).digest("hex")
-}
-
 export function rebuildKeywordIndex(source: Database, index: Database, sourcePath: string, state: { dataVersion: number; mtimeMs: number }) {
   debug.time("fts:rebuild")
   const rows = source.query<IndexSourceRow, []>(`
@@ -1018,27 +1056,38 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
     index.exec("DELETE FROM document")
     index.exec("DELETE FROM document_fts")
     index.exec("DELETE FROM document_index")
+    try {
+      index.exec("DELETE FROM vec_map")
+    } catch {}
     for (const row of rows.flatMap(indexSourceRowToRows)) {
-      const docID = `telescope:${row.session_id}:${row.message_id}:${row.id}:0`
-      const sourceHash = hashPartData({ session_id: row.session_id, message_id: row.message_id, part_id: row.id })
-      insertDoc.run(
-        docID,
-        row.id,
-        row.message_id,
-        row.session_id,
-        row.session_title ?? "Untitled session",
-        row.directory,
-        row.kind ?? "assistant",
-        row.role,
-        row.part_type ?? "text",
-        row.tool ?? null,
-        row.time_created,
-        0,
-        row.text,
-        sourceHash,
-        DOCUMENT_EXTRACTOR_VERSION,
-        now,
-      )
+      // Chunked document rows with stable doc_ids; keyword FTS stays part-level.
+      const partRow = row as IndexSourceRow & { kind?: Row["kind"]; text: string }
+      const chunks = chunkRowForEmbedding({
+        ...partRow,
+        data: "",
+        kind: row.kind ?? (row.role === "user" ? "user" : "assistant"),
+        text: row.text,
+      })
+      for (const chunk of chunks) {
+        insertDoc.run(
+          chunk.doc_id,
+          row.id,
+          row.message_id,
+          row.session_id,
+          row.session_title ?? "Untitled session",
+          row.directory,
+          row.kind ?? "assistant",
+          row.role,
+          row.part_type ?? "text",
+          row.tool ?? null,
+          row.time_created,
+          chunk.chunk_index,
+          chunk.text,
+          chunk.source_hash,
+          DOCUMENT_EXTRACTOR_VERSION,
+          now,
+        )
+      }
       insertFts.run(
         row.id,
         row.message_id,
@@ -1074,7 +1123,7 @@ export function rebuildKeywordIndex(source: Database, index: Database, sourcePat
     setMeta(index, "index_version", SEARCH_INDEX_VERSION)
     setMeta(index, "schema_version", "2")
     setMeta(index, "extractor_version", DOCUMENT_EXTRACTOR_VERSION)
-    setMeta(index, "ranking_version", "1")
+    setMeta(index, "ranking_version", "2")
     setMeta(index, "keyword_index_state", "ready")
     setMeta(index, "embedding_base_url", config.embedBaseUrl)
     setMeta(index, "document_prefix", config.documentPrefix)

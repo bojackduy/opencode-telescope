@@ -1,0 +1,100 @@
+{"q":"validateForSubmit patch","relevant_ids":["prt_patch_1"],"type":"exact","topic":"patch"}
+{"q":"SEARCH_WORKER_TIMEOUT_MS","relevant_ids":["prt_patch_1"],"type":"exact","topic":"patch"}
+{"q":"token memoization discussion","relevant_ids":["prt_auth_1","prt_auth_2"],"type":"exact","topic":"auth"}
+{"q":"auth caching","relevant_ids":["prt_auth_1","prt_auth_2"],"type":"paraphrase","topic":"auth"}
+{"q":"how did we cache auth tokens","relevant_ids":["prt_auth_1","prt_auth_2"],"type":"paraphrase","topic":"auth"}
+{"q":"login session expiry handling","relevant_ids":["prt_auth_1"],"type":"paraphrase","topic":"auth"}
+{"q":"rollout release ship","relevant_ids":["prt_deploy_1","prt_deploy_2"],"type":"exact","topic":"deploy"}
+{"q":"how did we ship the release","relevant_ids":["prt_deploy_1","prt_deploy_2"],"type":"paraphrase","topic":"deploy"}
+{"q":"production launch checklist","relevant_ids":["prt_deploy_1"],"type":"paraphrase","topic":"deploy"}
+{"q":"sqlite FTS5 bm25 ranking","relevant_ids":["prt_fts_1","prt_fts_2"],"type":"exact","topic":"fts"}
+{"q":"full text search relevance","relevant_ids":["prt_fts_1","prt_fts_2"],"type":"paraphrase","topic":"fts"}
+{"q":"why is keyword search fast","relevant_ids":["prt_fts_1"],"type":"paraphrase","topic":"fts"}
+{"q":"nomic embed text vector","relevant_ids":["prt_vec_1","prt_vec_2"],"type":"exact","topic":"vector"}
+{"q":"meaning based semantic lookup","relevant_ids":["prt_vec_1","prt_vec_2"],"type":"paraphrase","topic":"vector"}
+{"q":"find by meaning not keywords","relevant_ids":["prt_vec_1"],"type":"paraphrase","topic":"vector"}
+{"q":"apply_patch filediff hunk","relevant_ids":["prt_patch_1","prt_patch_2"],"type":"exact","topic":"patch"}
+{"q":"code edit diff application","relevant_ids":["prt_patch_1","prt_patch_2"],"type":"paraphrase","topic":"patch"}
+{"q":"how did we apply the code change","relevant_ids":["prt_patch_2"],"type":"paraphrase","topic":"patch"}
+{"q":"exception failure stack trace","relevant_ids":["prt_bug_1","prt_bug_2"],"type":"exact","topic":"bug"}
+{"q":"why did it crash with an error","relevant_ids":["prt_bug_1","prt_bug_2"],"type":"paraphrase","topic":"bug"}
+{"q":"fix the defect in error handling","relevant_ids":["prt_bug_1"],"type":"paraphrase","topic":"bug"}
+{"q":"restructure rewrite cleanup","relevant_ids":["prt_refactor_1"],"type":"exact","topic":"refactor"}
+{"q":"how should we clean up this module","relevant_ids":["prt_refactor_1"],"type":"paraphrase","topic":"refactor"}
+{"q":"reorganize the messy code","relevant_ids":["prt_refactor_1"],"type":"paraphrase","topic":"refactor"}
+{"q":"configuration setting setup option","relevant_ids":["prt_config_1"],"type":"exact","topic":"config"}
+{"q":"where is the setup option stored","relevant_ids":["prt_config_1"],"type":"paraphrase","topic":"config"}
+{"q":"change default settings","relevant_ids":["prt_config_1"],"type":"paraphrase","topic":"config"}
+{"q":"sql query schema storage","relevant_ids":["prt_db_1","prt_db_2"],"type":"exact","topic":"db"}
+{"q":"how is data persisted","relevant_ids":["prt_db_1","prt_db_2"],"type":"paraphrase","topic":"db"}
+{"q":"database performance indexing","relevant_ids":["prt_db_1"],"type":"paraphrase","topic":"db"}
+{"q":"unit test spec assertion verify","relevant_ids":["prt_test_1"],"type":"exact","topic":"test"}
+{"q":"how do we verify correctness","relevant_ids":["prt_test_1"],"type":"paraphrase","topic":"test"}
+{"q":"add coverage for edge cases","relevant_ids":["prt_test_1"],"type":"paraphrase","topic":"test"}
+{"q":"permission access vulnerability secure","relevant_ids":["prt_sec_1"],"type":"exact","topic":"security"}
+{"q":"who can access this endpoint","relevant_ids":["prt_sec_1"],"type":"paraphrase","topic":"security"}
+{"q":"is this auth check safe","relevant_ids":["prt_sec_1","prt_auth_1"],"type":"paraphrase","topic":"security"}
+{"q":"speed up efficient fast performance","relevant_ids":["prt_perf_1"],"type":"exact","topic":"perf"}
+{"q":"why is search slow on large DB","relevant_ids":["prt_perf_1","prt_fts_1"],"type":"paraphrase","topic":"perf"}
+{"q":"optimize the hot path","relevant_ids":["prt_perf_1"],"type":"paraphrase","topic":"perf"}
+{"q":"hello greeting help","relevant_ids":["prt_small_1"],"type":"exact","topic":"small"}
+{"q":"hi there assist guide","relevant_ids":["prt_small_1"],"type":"paraphrase","topic":"small"}
+{"q":"thanks appreciate","relevant_ids":["prt_small_1"],"type":"paraphrase","topic":"small"}
+{"q":"session jump preview anchor","relevant_ids":["prt_ux_1"],"type":"exact","topic":"ux"}
+{"q":"how does preview stay on match","relevant_ids":["prt_ux_1"],"type":"paraphrase","topic":"ux"}
+{"q":"open result at right message","relevant_ids":["prt_ux_1"],"type":"paraphrase","topic":"ux"}
+{"q":"worker timeout fallback indexing","relevant_ids":["prt_worker_1"],"type":"exact","topic":"worker"}
+{"q":"background job keeps UI fast","relevant_ids":["prt_worker_1"],"type":"paraphrase","topic":"worker"}
+{"q":"what happens when search is slow","relevant_ids":["prt_worker_1"],"type":"paraphrase","topic":"worker"}
+{"q":"scoped search user assistant thought","relevant_ids":["prt_scope_1"],"type":"exact","topic":"scope"}
+{"q":"only my prompts about timeout","relevant_ids":["prt_scope_1"],"type":"paraphrase","topic":"scope"}
+{"q":"find reasoning traces","relevant_ids":["prt_scope_1"],"type":"paraphrase","topic":"scope"}
+{"q":"chunk overlap split boundary","relevant_ids":["prt_chunk_1"],"type":"exact","topic":"chunk"}
+{"q":"how to cut long documents","relevant_ids":["prt_chunk_1","prt_vec_1"],"type":"paraphrase","topic":"chunk"}
+{"q":"don't break code fences","relevant_ids":["prt_chunk_1"],"type":"paraphrase","topic":"chunk"}
+{"q":"reciprocal rank fusion RRF","relevant_ids":["prt_rank_1"],"type":"exact","topic":"rank"}
+{"q":"how to combine keyword and vector","relevant_ids":["prt_rank_1","prt_vec_1"],"type":"paraphrase","topic":"rank"}
+{"q":"best way to merge two rankings","relevant_ids":["prt_rank_1"],"type":"paraphrase","topic":"rank"}
+{"q":"incremental sync checkpoint rowid","relevant_ids":["prt_sync_1"],"type":"exact","topic":"sync"}
+{"q":"how do new messages get indexed","relevant_ids":["prt_sync_1","prt_worker_1"],"type":"paraphrase","topic":"sync"}
+{"q":"avoid full rebuild every time","relevant_ids":["prt_sync_1"],"type":"paraphrase","topic":"sync"}
+{"q":"sqlite-vec extension load path","relevant_ids":["prt_ops_1"],"type":"exact","topic":"ops"}
+{"q":"why is vector unavailable on mac","relevant_ids":["prt_ops_1"],"type":"paraphrase","topic":"ops"}
+{"q":"llama-server health check","relevant_ids":["prt_ops_1","prt_vec_1"],"type":"paraphrase","topic":"ops"}
+{"q":"auth token refresh flow","relevant_ids":["prt_auth_2"],"type":"exact","topic":"auth"}
+{"q":"deploy rollback strategy","relevant_ids":["prt_deploy_2"],"type":"exact","topic":"deploy"}
+{"q":"fts prefix wildcard AND","relevant_ids":["prt_fts_2"],"type":"exact","topic":"fts"}
+{"q":"embedding dimensions model prefix","relevant_ids":["prt_vec_2"],"type":"exact","topic":"vector"}
+{"q":"edit oldString newString diff","relevant_ids":["prt_patch_2"],"type":"exact","topic":"patch"}
+{"q":"bug defect issue triage","relevant_ids":["prt_bug_2"],"type":"exact","topic":"bug"}
+{"q":"improve restructure module boundary","relevant_ids":["prt_refactor_1"],"type":"paraphrase","topic":"refactor"}
+{"q":"persist query results locally","relevant_ids":["prt_db_2"],"type":"paraphrase","topic":"db"}
+{"q":"flaky test quarantine","relevant_ids":["prt_test_1"],"type":"paraphrase","topic":"test"}
+{"q":"least privilege access control","relevant_ids":["prt_sec_1"],"type":"paraphrase","topic":"security"}
+{"q":"p95 latency budget keystroke","relevant_ids":["prt_perf_1"],"type":"paraphrase","topic":"perf"}
+{"q":"recent searches empty state","relevant_ids":["prt_ux_1"],"type":"paraphrase","topic":"ux"}
+{"q":"stale index background refresh","relevant_ids":["prt_sync_1"],"type":"paraphrase","topic":"sync"}
+{"q":"hybrid alpha blend weight","relevant_ids":["prt_rank_1"],"type":"exact","topic":"rank"}
+{"q":"version mismatch re-embed","relevant_ids":["prt_sync_1","prt_vec_2"],"type":"paraphrase","topic":"sync"}
+{"q":"recall at twenty evaluation","relevant_ids":["prt_rank_1","prt_test_1"],"type":"paraphrase","topic":"rank"}
+{"q":"that auth decision last week","relevant_ids":["prt_auth_1","prt_auth_2"],"type":"vague","topic":"auth"}
+{"q":"that deploy thing we discussed","relevant_ids":["prt_deploy_1"],"type":"vague","topic":"deploy"}
+{"q":"something about search speed","relevant_ids":["prt_perf_1","prt_fts_1"],"type":"vague","topic":"perf"}
+{"q":"conversation about patches","relevant_ids":["prt_patch_1","prt_patch_2"],"type":"vague","topic":"patch"}
+{"q":"old discussion on vectors","relevant_ids":["prt_vec_1","prt_vec_2"],"type":"vague","topic":"vector"}
+{"q":"what did we decide on config","relevant_ids":["prt_config_1"],"type":"vague","topic":"config"}
+{"q":"where was that bug fix","relevant_ids":["prt_bug_1"],"type":"vague","topic":"bug"}
+{"q":"testing conversation","relevant_ids":["prt_test_1"],"type":"vague","topic":"test"}
+{"q":"security review thread","relevant_ids":["prt_sec_1"],"type":"vague","topic":"security"}
+{"q":"database stuff","relevant_ids":["prt_db_1","prt_db_2"],"type":"vague","topic":"db"}
+{"q":"refactor ideas","relevant_ids":["prt_refactor_1"],"type":"vague","topic":"refactor"}
+{"q":"indexing background work","relevant_ids":["prt_worker_1","prt_sync_1"],"type":"vague","topic":"worker"}
+{"q":"ranking merge","relevant_ids":["prt_rank_1"],"type":"vague","topic":"rank"}
+{"q":"chunking long docs","relevant_ids":["prt_chunk_1"],"type":"vague","topic":"chunk"}
+{"q":"setup help","relevant_ids":["prt_small_1","prt_config_1"],"type":"vague","topic":"small"}
+{"q":"jump to session","relevant_ids":["prt_ux_1"],"type":"vague","topic":"ux"}
+{"q":"scoped query syntax","relevant_ids":["prt_scope_1"],"type":"vague","topic":"scope"}
+{"q":"extension install issue","relevant_ids":["prt_ops_1"],"type":"vague","topic":"ops"}
+{"q":"sync checkpoint","relevant_ids":["prt_sync_1"],"type":"vague","topic":"sync"}
+{"q":"fts ranking","relevant_ids":["prt_fts_1","prt_rank_1"],"type":"vague","topic":"fts"}
+{"q":"fts prefix search","relevant_ids":["prt_fts_2"],"type":"exact","topic":"fts"}

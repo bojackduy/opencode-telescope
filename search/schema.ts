@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite"
 
-export const SEARCH_INDEX_VERSION = "9"
-export const DOCUMENT_EXTRACTOR_VERSION = "1"
+export const SEARCH_INDEX_VERSION = "10"
+export const DOCUMENT_EXTRACTOR_VERSION = "2"
+export const CHUNKER_VERSION = "2"
 
 export function migrateSearchIndex(db: Database) {
   db.exec(`
@@ -128,6 +129,11 @@ export function migrateSearchIndex(db: Database) {
       ON document_index(directory, kind, time_created DESC);
     CREATE INDEX IF NOT EXISTS document_index_time_idx
       ON document_index(time_created DESC);
+    CREATE TABLE IF NOT EXISTS vec_map(
+      vec_rowid INTEGER PRIMARY KEY,
+      doc_id TEXT UNIQUE NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS vec_map_doc_idx ON vec_map(doc_id);
   `)
 }
 

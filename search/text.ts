@@ -107,10 +107,148 @@ export function extractIndexText(data: string) {
   }
 }
 
+export const CHUNKER_VERSION = "2"
+export const MAX_CHUNK_CHARS = 1400
+export const CHUNK_OVERLAP_CHARS = 180
+
+export function buildDocId(sessionId: string, messageId: string, partId: string, chunkIndex: number): string {
+  return `telescope:${sessionId}:${messageId}:${partId}:${chunkIndex}`
+}
+
+export function hashChunkContent(extractorVersion: string, text: string): string {
+  // Content hash (not just IDs) so re-embeds trigger only on real changes.
+  let hash = 0
+  const input = `${extractorVersion}\n${text}`
+  for (let i = 0; i < input.length; i++) {
+    hash = (Math.imul(hash, 31) + input.charCodeAt(i)) | 0
+  }
+  return `v${extractorVersion}:${(hash >>> 0).toString(16)}:${text.length}`
+}
+
+export function chunkTextForEmbedding(text: string, maxChars: number = MAX_CHUNK_CHARS, overlap: number = CHUNK_OVERLAP_CHARS): string[] {
+  const normalized = text.replace(/\r\n/g, "\n").trim()
+  if (!normalized) return []
+  if (normalized.length <= maxChars) return [normalized]
+
+  // Split into fence-aware blocks: never cut inside ``` fences.
+  const blocks = splitFenceAware(normalized)
+  const chunks: string[] = []
+  let current = ""
+
+  const push = () => {
+    const trimmed = current.trim()
+    if (trimmed) chunks.push(trimmed)
+    current = ""
+  }
+
+  for (const block of blocks) {
+    if (!block.trim()) continue
+    if (block.length > maxChars) {
+      // Oversized block (e.g. huge file content): hard-split with overlap.
+      if (current.trim()) push()
+      for (const piece of hardSplitWithOverlap(block, maxChars, overlap)) {
+        chunks.push(piece)
+      }
+      continue
+    }
+    const candidate = current ? `${current}\n\n${block}` : block
+    if (candidate.length <= maxChars) {
+      current = candidate
+    } else {
+      push()
+      // Overlap: carry tail of previous chunk so context survives the cut.
+      const prev = chunks.at(-1) ?? ""
+      const carry = prev.slice(Math.max(0, prev.length - overlap))
+      current = carry && block.length + carry.length + 2 <= maxChars * 1.5
+        ? `${carry}\n\n${block}`.slice(-maxChars)
+        : block
+      if (current.length > maxChars) {
+        push()
+      }
+    }
+  }
+  push()
+  return chunks.filter(Boolean)
+}
+
+function splitFenceAware(text: string): string[] {
+  const lines = text.split("\n")
+  const blocks: string[] = []
+  let buf: string[] = []
+  let inFence = false
+
+  const flush = () => {
+    if (buf.length) {
+      // Further split large non-fence runs on blank lines.
+      const joined = buf.join("\n")
+      buf = []
+      if (inFence || joined.length < MAX_CHUNK_CHARS * 2) {
+        blocks.push(joined)
+      } else {
+        for (const para of joined.split(/\n\s*\n/)) {
+          if (para.trim()) blocks.push(para)
+        }
+      }
+    }
+  }
+
+  for (const line of lines) {
+    if (line.trimStart().startsWith("```")) {
+      buf.push(line)
+      if (inFence) {
+        // Fence closed: keep whole code block together when possible.
+        flush()
+      } else {
+        flush()
+      }
+      inFence = !inFence
+      continue
+    }
+    if (!inFence && line.trim() === "" && buf.join("\n").length > 600) {
+      buf.push(line)
+      flush()
+      continue
+    }
+    buf.push(line)
+  }
+  flush()
+  return blocks.filter((b) => b.trim())
+}
+
+function hardSplitWithOverlap(text: string, maxChars: number, overlap: number): string[] {
+  const out: string[] = []
+  let start = 0
+  while (start < text.length) {
+    let end = Math.min(text.length, start + maxChars)
+    if (end < text.length) {
+      // Prefer newline boundary.
+      const nl = text.lastIndexOf("\n", end)
+      if (nl > start + maxChars * 0.5) end = nl + 1
+    }
+    out.push(text.slice(start, end).trim())
+    if (end >= text.length) break
+    start = Math.max(end - overlap, start + 1)
+  }
+  return out.filter(Boolean)
+}
+
 export function indexSourceRowToRows(row: IndexSourceRow): Row[] {
   const text = extractIndexText(row.data)
   if (!text) return []
-  return [{ ...row, kind: searchKindForRow(row), text }]
+  const kind = searchKindForRow(row)
+  // Keyword index stays part-granular (FTS handles long text + snippet anchoring).
+  // Chunking is for the vector path; see chunkTextForEmbedding + buildDocId.
+  return [{ ...row, kind, text }]
+}
+
+export function chunkRowForEmbedding(row: IndexSourceRow & { kind: SearchKind; text: string }): Array<{ chunk_index: number; doc_id: string; text: string; source_hash: string }> {
+  const chunks = chunkTextForEmbedding(row.text)
+  return chunks.map((text, chunk_index) => ({
+    chunk_index,
+    doc_id: buildDocId(row.session_id, row.message_id, row.id, chunk_index),
+    text,
+    source_hash: hashChunkContent(CHUNKER_VERSION, text),
+  }))
 }
 
 function searchKindForRow(row: IndexSourceRow): SearchKind {

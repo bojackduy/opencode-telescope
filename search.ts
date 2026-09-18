@@ -58,11 +58,30 @@ export {
   extractSearchText,
   ftsQuery,
   expandQuery,
+  chunkTextForEmbedding,
+  chunkRowForEmbedding,
+  buildDocId,
+  hashChunkContent,
+  CHUNKER_VERSION,
+  MAX_CHUNK_CHARS,
+  CHUNK_OVERLAP_CHARS,
 } from "./search/text.ts"
 
 // Re-exported vector/blend functions
 export {
   hybridBlend,
+  rrfBlend,
+  RRF_K,
+  searchVector,
+  buildVectorSearchPlan,
+  isVectorReady,
+  isVectorVersionStale,
+  getEmbeddingVersion,
+  collectStaleVectorChunks,
+  upsertVectorChunkEmbeddings,
+  removeVectorChunksForPart,
+  removeVectorChunksForDocIds,
+  syncVectorIndexForDbPath,
 } from "./search/vector.ts"
 
 // Re-exported path utilities

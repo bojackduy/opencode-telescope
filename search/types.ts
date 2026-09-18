@@ -129,6 +129,8 @@ export type Row = {
   time_created: number
   text: string
   matchTerm?: string
+  chunk_index?: number
+  doc_id?: string
 }
 
 export type IndexSourceRow = Omit<Row, "text"> & {
