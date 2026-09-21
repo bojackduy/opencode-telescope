@@ -105,48 +105,66 @@ const tui: TuiPlugin = async (api: TuiPluginApi, options: unknown) => {
 //   no `parentID`, so the jump-to-turn heuristic (needs parent links) stays
 //   disabled on v2 while exact target matching works as before.
 function adaptThemeV2(theme: TuiV2.Context["theme"]): TuiThemeCurrent {
+  // The live theme object may omit nested groups (custom/minimal themes),
+  // and this getter runs inside render — a throw here crashes the whole TUI.
+  // Every leaf falls back through text.default to a hardcoded default.
+  const t = (theme ?? {}) as any
+  const text = t.text ?? {}
+  const fb = text.feedback ?? {}
+  const bg = t.background ?? {}
+  const surface = bg.surface ?? {}
+  const diff = t.diff ?? {}
+  const diffText = diff.text ?? {}
+  const diffBg = diff.background ?? {}
+  const diffHi = diff.highlight ?? {}
+  const diffLn = diff.lineNumber ?? {}
+  const syntax = t.syntax ?? {}
+  const md = t.markdown ?? {}
+  const dv = (v: unknown, fallback: string) => (typeof v === "string" ? v : fallback)
+  const base = dv(text.default, "#ffffff")
+  const muted = dv(text.subdued, "#888888")
   return {
-    text: theme.text.default,
-    textMuted: theme.text.subdued,
-    primary: theme.text.default,
-    accent: theme.text.default,
-    success: theme.text.feedback.success.default,
-    warning: theme.text.feedback.warning.default,
-    error: theme.text.feedback.error.default,
-    info: theme.text.feedback.info.default,
-    background: theme.background.default,
-    backgroundPanel: theme.background.surface.overlay,
-    backgroundElement: theme.background.surface.offset,
-    diffAdded: theme.diff.text.added,
-    diffRemoved: theme.diff.text.removed,
-    diffContext: theme.diff.text.context,
-    diffAddedBg: theme.diff.background.added,
-    diffRemovedBg: theme.diff.background.removed,
-    diffContextBg: theme.diff.background.context,
-    diffHighlightAdded: theme.diff.highlight.added,
-    diffHighlightRemoved: theme.diff.highlight.removed,
-    diffLineNumber: theme.diff.lineNumber.text,
-    diffAddedLineNumberBg: theme.diff.lineNumber.background.added,
-    diffRemovedLineNumberBg: theme.diff.lineNumber.background.removed,
-    syntaxComment: theme.syntax.comment,
-    syntaxKeyword: theme.syntax.keyword,
-    syntaxFunction: theme.syntax.function,
-    syntaxVariable: theme.syntax.variable,
-    syntaxString: theme.syntax.string,
-    syntaxNumber: theme.syntax.number,
-    syntaxType: theme.syntax.type,
-    syntaxOperator: theme.syntax.operator,
-    syntaxPunctuation: theme.syntax.punctuation,
-    markdownText: theme.markdown.text,
-    markdownHeading: theme.markdown.heading,
-    markdownLink: theme.markdown.link,
-    markdownLinkText: theme.markdown.linkText,
-    markdownCode: theme.markdown.code,
-    markdownBlockQuote: theme.markdown.blockQuote,
-    markdownEmph: theme.markdown.emphasis,
-    markdownStrong: theme.markdown.strong,
-    markdownListItem: theme.markdown.listItem,
-  } as TuiThemeCurrent
+    text: base,
+    textMuted: muted,
+    primary: base,
+    accent: base,
+    success: dv(fb.success?.default, "#22c55e"),
+    warning: dv(fb.warning?.default, "#eab308"),
+    error: dv(fb.error?.default, "#ef4444"),
+    info: dv(fb.info?.default, base),
+    background: dv(bg.default, "#000000"),
+    backgroundPanel: dv(surface.overlay, dv(bg.default, "#000000")),
+    backgroundElement: dv(surface.offset, dv(bg.default, "#000000")),
+    diffAdded: dv(diffText.added, base),
+    diffRemoved: dv(diffText.removed, base),
+    diffContext: dv(diffText.context, muted),
+    diffAddedBg: dv(diffBg.added, dv(bg.default, "#000000")),
+    diffRemovedBg: dv(diffBg.removed, dv(bg.default, "#000000")),
+    diffContextBg: dv(diffBg.context, dv(bg.default, "#000000")),
+    diffHighlightAdded: dv(diffHi.added, base),
+    diffHighlightRemoved: dv(diffHi.removed, base),
+    diffLineNumber: dv(diffLn.text, muted),
+    diffAddedLineNumberBg: dv(diffLn.background?.added, dv(bg.default, "#000000")),
+    diffRemovedLineNumberBg: dv(diffLn.background?.removed, dv(bg.default, "#000000")),
+    syntaxComment: dv(syntax.comment, muted),
+    syntaxKeyword: dv(syntax.keyword, base),
+    syntaxFunction: dv(syntax.function, base),
+    syntaxVariable: dv(syntax.variable, base),
+    syntaxString: dv(syntax.string, base),
+    syntaxNumber: dv(syntax.number, base),
+    syntaxType: dv(syntax.type, base),
+    syntaxOperator: dv(syntax.operator, base),
+    syntaxPunctuation: dv(syntax.punctuation, muted),
+    markdownText: dv(md.text, base),
+    markdownHeading: dv(md.heading, base),
+    markdownLink: dv(md.link, base),
+    markdownLinkText: dv(md.linkText, base),
+    markdownCode: dv(md.code, base),
+    markdownBlockQuote: dv(md.blockQuote, muted),
+    markdownEmph: dv(md.emphasis, base),
+    markdownStrong: dv(md.strong, base),
+    markdownListItem: dv(md.listItem, base),
+  } as unknown as TuiThemeCurrent
 }
 
 // `define()` in `@opencode/plugin` is the identity function, so the v2 side is
