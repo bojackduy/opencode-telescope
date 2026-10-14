@@ -1,4 +1,4 @@
-import { SyntaxStyle } from "@opentui/core"
+import { SyntaxStyle, type ThemeTokenStyle } from "@opentui/core"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { SearchResult } from "../search.ts"
 
@@ -55,8 +55,8 @@ export function markdownWithMatch(before: string, match: string, after: string, 
   return `${before}**${escapeMarkdownInline(match)}**${after}`
 }
 
-export function syntaxStyle(theme: TuiThemeCurrent) {
-  return SyntaxStyle.fromTheme([
+export function syntaxStyle(theme: TuiThemeCurrent, owner?: unknown) {
+  return (SyntaxStyle as { fromTheme(theme: ThemeTokenStyle[], owner?: unknown): SyntaxStyle }).fromTheme([
     { scope: ["default"], style: { foreground: theme.text } },
     { scope: ["comment", "comment.documentation"], style: { foreground: theme.syntaxComment, italic: true } },
     { scope: ["string", "symbol", "character", "character.special"], style: { foreground: theme.syntaxString } },
@@ -93,7 +93,7 @@ export function syntaxStyle(theme: TuiThemeCurrent) {
     { scope: ["diff.minus"], style: { foreground: theme.diffRemoved, background: theme.diffRemovedBg } },
     { scope: ["diff.delta"], style: { foreground: theme.diffContext, background: theme.diffContextBg } },
     { scope: ["info"], style: { foreground: theme.info } },
-  ])
+  ], owner)
 }
 
 export function truncate(value: string, length: number) {
