@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import { SyntaxStyle } from "@opentui/core"
 import { compactTime, markdownWithMatch, roleColor, roleLabel, syntaxStyle, toolIcon, toolInputSummary, toolLabel, truncate } from "./format.ts"
 
 describe("format utils", () => {
@@ -106,10 +107,18 @@ describe("format utils", () => {
       .toBe("text")
   })
 
-  test("syntaxStyle returns a SyntaxStyle instance", () => {
-    const style = syntaxStyle(mockTheme as never)
-    expect(style).toBeDefined()
-    expect(typeof style).toBe("object")
+  test("syntaxStyle returns a SyntaxStyle instance and forwards owner", () => {
+    const spy = spyOn(SyntaxStyle, "fromTheme")
+    const owner = { resourceContext: {} }
+    try {
+      const style = syntaxStyle(mockTheme as never, owner)
+      expect(style).toBeDefined()
+      expect(typeof style).toBe("object")
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect((spy.mock.calls[0] as unknown[])?.[1]).toBe(owner)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test("truncate handles short and long strings", () => {

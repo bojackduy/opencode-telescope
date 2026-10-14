@@ -79,7 +79,7 @@ export const Telescope = (props: { api: TuiPluginApi; config: TelescopeConfig; o
   let previewScroll: ScrollBoxRenderable | undefined
 
   const theme = createMemo(() => props.api.theme.current)
-  const syntax = createMemo(() => syntaxStyle(theme()))
+  const syntax = createMemo(() => syntaxStyle(theme(), (props.api.renderer as { nativeScene?: unknown } | undefined)?.nativeScene))
   const ownerRole = createMemo(() => ownerFilter() === "all" ? undefined : ownerFilter() as SearchRole)
   const ownerLabel = createMemo(() => ownerFilter() === "user" ? "you" : ownerFilter())
   const parsedQuery = createMemo(() => parseSearchQuery(query()))
